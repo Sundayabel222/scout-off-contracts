@@ -38,4 +38,6 @@ pub enum DataKey {
     Milestone(u64, u32),
     /// registration contract address (cross-contract calls)
     RegistrationContract,
+    /// milestone count per validator wallet
+    ValidatorMilestoneCount(Address),
 }

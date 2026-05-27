@@ -168,6 +168,13 @@ impl VerificationContract {
             .persistent()
             .set(&counter_key, &next_index);
 
+        // Increment per-validator milestone count
+        let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
+        let val_count: u32 = env.storage().persistent().get(&val_key).unwrap_or(0u32);
+        env.storage()
+            .persistent()
+            .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
+
         events::milestone_approved(&env, player_id, &validator_wallet);
 
         // Cross-contract call: advance the player's progress level.
@@ -212,6 +219,13 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .get(&DataKey::MilestoneCounter(player_id))
+            .unwrap_or(0u32)
+    }
+
+    pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorMilestoneCount(wallet))
             .unwrap_or(0u32)
     }
 
@@ -278,6 +292,30 @@ mod tests {
         let id = env.register_contract(None, VerificationContract);
         let client = VerificationContractClient::new(&env, &id);
         (env, client)
+    }
+
+    #[test]
+    fn test_validator_milestone_count() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        // Unknown wallet returns 0
+        assert_eq!(client.get_validator_milestone_count(&Address::generate(&env)), 0);
+
+        for i in 1u64..=3 {
+            client.approve_milestone(
+                &validator,
+                &i,
+                &String::from_str(&env, "milestone"),
+                &String::from_str(&env, "QmEvidence"),
+            );
+        }
+
+        assert_eq!(client.get_validator_milestone_count(&validator), 3);
     }
 
     #[test]
