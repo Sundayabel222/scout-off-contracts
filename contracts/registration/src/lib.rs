@@ -84,7 +84,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        let player_id = Self::next_player_id(&env);
+        let player_id = Self::next_player_id(&env)?;
         let now = env.ledger().timestamp();
 
         let profile = PlayerProfile {
@@ -155,7 +155,7 @@ impl RegistrationContract {
             return Err(ScoutChainError::InvalidInput);
         }
 
-        let scout_id = Self::next_scout_id(&env);
+        let scout_id = Self::next_scout_id(&env)?;
         let profile = ScoutProfile {
             scout_id,
             wallet: wallet.clone(),
@@ -253,30 +253,30 @@ impl RegistrationContract {
             .ok_or(ScoutChainError::PlayerNotFound)
     }
 
-    fn next_player_id(env: &Env) -> u64 {
+    fn next_player_id(env: &Env) -> Result<u64, ScoutChainError> {
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::PlayerCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).expect("overflow");
+        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::PlayerCounter, &next);
-        next
+        Ok(next)
     }
 
-    fn next_scout_id(env: &Env) -> u64 {
+    fn next_scout_id(env: &Env) -> Result<u64, ScoutChainError> {
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::ScoutCounter)
             .unwrap_or(0u64);
-        let next = id.checked_add(1).expect("overflow");
+        let next = id.checked_add(1).ok_or(ScoutChainError::Overflow)?;
         env.storage()
             .instance()
             .set(&DataKey::ScoutCounter, &next);
-        next
+        Ok(next)
     }
 }
 
@@ -537,5 +537,46 @@ mod tests {
         let exactly_128 = String::from_str(&env, &"A".repeat(128));
         let scout_id = client.register_scout(&wallet, &exactly_128);
         assert_eq!(scout_id, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #24: next_player_id and next_scout_id overflow handling
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_next_player_id_overflow() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Manually set counter to u64::MAX to trigger overflow
+        env.storage()
+            .instance()
+            .set(&DataKey::PlayerCounter, &u64::MAX);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        // This should panic with Overflow error
+        client.register_player(&wallet, &vitals, &hashes);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_next_scout_id_overflow() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Manually set counter to u64::MAX to trigger overflow
+        env.storage()
+            .instance()
+            .set(&DataKey::ScoutCounter, &u64::MAX);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        // This should panic with Overflow error
+        client.register_scout(&wallet, &region);
     }
 }
