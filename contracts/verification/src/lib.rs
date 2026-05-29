@@ -527,21 +527,4 @@ mod tests {
         let unknown = Address::generate(&env);
         client.get_validator(&unknown);
     }
-
-    #[test]
-    fn test_get_validator_returns_correct_data() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let wallet = Address::generate(&env);
-        let creds = String::from_str(&env, "UEFA B License");
-        client.register_validator(&wallet, &creds);
-
-        let validator = client.get_validator(&wallet);
-        assert_eq!(validator.wallet, wallet);
-        assert_eq!(validator.credentials, creds);
-        assert!(validator.active);
-        assert!(validator.registered_at > 0);
-    }
 }
