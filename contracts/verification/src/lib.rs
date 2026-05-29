@@ -380,7 +380,6 @@ mod tests {
             &String::from_str(&env, "QmEvidence"),
         );
     }
-}
 
     #[test]
     fn test_milestone_approved_event_payload() {
@@ -404,3 +403,4 @@ mod tests {
         assert_eq!(milestone_event.topics.len(), 3); // event name, validator, milestone_index
         assert_eq!(milestone_event.data.len(), 3); // player_id, description, evidence_hash
     }
+}
