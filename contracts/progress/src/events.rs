@@ -1,6 +1,13 @@
 use soroban_sdk::{Address, Env, Symbol};
 use scoutchain_shared_types::ProgressLevel;
 
+pub fn initialized(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "initialized"),),
+        admin.clone(),
+    );
+}
+
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "admin_transferred"),),

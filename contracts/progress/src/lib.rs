@@ -24,6 +24,7 @@ impl ProgressContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        events::initialized(&env, &admin);
         Ok(())
     }
 
