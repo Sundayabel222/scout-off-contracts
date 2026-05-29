@@ -7,6 +7,9 @@ use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
+const PERSISTENT_TTL_MIN: u32 = 500;
+const PERSISTENT_TTL_MAX: u32 = 2000;
+
 #[contract]
 pub struct ScoutAccessContract;
 
@@ -109,6 +112,9 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::Subscription(scout.clone()), &sub);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         events::scout_subscribed(&env, &scout, &tier);
         Ok(())
@@ -145,6 +151,12 @@ impl ScoutAccessContract {
         Self::accumulate_fee(&env, config.contact_fee_stroops);
 
         env.storage().persistent().set(&contact_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&contact_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         events::player_contacted(&env, player_id, &scout);
         Ok(())
     }
@@ -168,6 +180,9 @@ impl ScoutAccessContract {
         if sub.tier != SubscriptionTier::Elite {
             return Err(ScoutAccessError::Unauthorized);
         }
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Subscription(scout.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         let counter_key = DataKey::TrialCounter(player_id);
         let index: u32 = env
@@ -201,10 +216,15 @@ impl ScoutAccessContract {
         env: Env,
         scout: Address,
     ) -> Result<Subscription, ScoutAccessError> {
+        let sub = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(scout.clone()))
+            .ok_or(ScoutAccessError::ScoutNotSubscribed)?;
         env.storage()
             .persistent()
-            .get(&DataKey::Subscription(scout))
-            .ok_or(ScoutAccessError::ScoutNotSubscribed)
+            .extend_ttl(&DataKey::Subscription(scout), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(sub)
     }
 
     pub fn get_fee_config(env: Env) -> FeeConfig {
@@ -219,9 +239,14 @@ impl ScoutAccessContract {
     }
 
     pub fn has_contacted(env: Env, scout: Address, player_id: u64) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::ContactRecord(player_id, scout))
+        let key = DataKey::ContactRecord(player_id, scout);
+        let exists = env.storage().persistent().has(&key);
+        if exists {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        exists
     }
 
     pub fn get_trial_offer(
@@ -474,5 +499,32 @@ mod tests {
 
         // Should panic with SubscriptionExpired
         client.pay_to_contact(&scout, &1u64);
+    }
+
+    #[test]
+    fn test_subscription_ttl_extended_after_ledger_advance() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 200;
+            l.max_entry_ttl = 10_000;
+        });
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        // subscribe writes the entry and extends TTL to PERSISTENT_TTL_MAX (2000).
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        // Advance past the default min_persistent_entry_ttl (200) but within
+        // PERSISTENT_TTL_MAX (2000) — the entry must still be live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 500;
+        });
+
+        // get_subscription must succeed and re-extend the TTL.
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Basic);
     }
 }
