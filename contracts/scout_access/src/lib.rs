@@ -7,8 +7,9 @@ use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
-const PERSISTENT_TTL_MIN: u32 = 500;
-const PERSISTENT_TTL_MAX: u32 = 2000;
+// ~30 days at 5 s/ledger; extend when TTL drops below half that.
+const TRIAL_TTL_THRESHOLD: u32 = 259_200;
+const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
 
 #[contract]
 pub struct ScoutAccessContract;
@@ -202,7 +203,13 @@ impl ScoutAccessContract {
         env.storage()
             .persistent()
             .set(&DataKey::TrialOffer(player_id, next_index), &offer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TrialOffer(player_id, next_index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
         env.storage().persistent().set(&counter_key, &next_index);
+        env.storage()
+            .persistent()
+            .extend_ttl(&counter_key, TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
 
         events::trial_offer_logged(&env, player_id, &scout);
         Ok(next_index)
@@ -254,17 +261,29 @@ impl ScoutAccessContract {
         player_id: u64,
         index: u32,
     ) -> Result<TrialOffer, ScoutAccessError> {
-        env.storage()
+        let offer = env
+            .storage()
             .persistent()
             .get(&DataKey::TrialOffer(player_id, index))
-            .ok_or(ScoutAccessError::TrialOfferNotFound)
+            .ok_or(ScoutAccessError::TrialOfferNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TrialOffer(player_id, index), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        Ok(offer)
     }
 
     pub fn get_trial_count(env: Env, player_id: u64) -> u32 {
-        env.storage()
+        let count = env
+            .storage()
             .persistent()
             .get(&DataKey::TrialCounter(player_id))
-            .unwrap_or(0u32)
+            .unwrap_or(0u32);
+        if count > 0 {
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::TrialCounter(player_id), TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        }
+        count
     }
 
     pub fn health(env: Env) -> bool {
@@ -462,6 +481,37 @@ mod tests {
         let offer = client.get_trial_offer(&1u64, &1u32);
         assert_eq!(offer.player_id, 1);
         assert_eq!(offer.scout, scout);
+    }
+
+    #[test]
+    fn test_trial_offer_ttl_extended_after_ledger_advance() {
+        let (env, admin, xlm, contract_id, client) = setup();
+
+        // Start at a known ledger sequence so TTL arithmetic is predictable.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // log_trial_offer stores the entry and immediately calls extend_ttl
+        // with TRIAL_TTL_EXTEND_TO (518_400 ledgers).
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTTLTest"));
+
+        // Advance the ledger well past the default min_persistent_entry_ttl (500)
+        // but within TRIAL_TTL_EXTEND_TO (518_400). The entry must still be live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 1_000;
+        });
+
+        // Both the offer and the counter must still be accessible.
+        let offer = client.get_trial_offer(&1u64, &1u32);
+        assert_eq!(offer.player_id, 1);
+        assert_eq!(client.get_trial_count(&1u64), 1);
     }
 
     #[test]
