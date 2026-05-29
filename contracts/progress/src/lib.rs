@@ -90,6 +90,7 @@ impl ProgressContract {
             updated_by: caller.clone(),
             updated_at: env.ledger().timestamp(),
             milestone_ref,
+            ledger_sequence: env.ledger().sequence(),
         };
 
         env.storage()
@@ -199,6 +200,18 @@ mod tests {
         let id = env.register_contract(None, ProgressContract);
         let client = ProgressContractClient::new(&env, &id);
         (env, client)
+    }
+
+    #[test]
+    fn test_history_entry_ledger_sequence() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        let player_id = 1u64;
+        client.advance_level(&validator, &player_id, &1u32);
+        let entry = client.get_history_entry(&player_id, &1u32);
+        assert!(entry.ledger_sequence > 0);
     }
 
     #[test]
