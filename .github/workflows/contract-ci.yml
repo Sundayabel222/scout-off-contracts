@@ -31,8 +31,17 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Test registration contract
+        run: cargo test -p scoutchain-registration
+
+      - name: Test verification contract
+        run: cargo test -p scoutchain-verification
+
+      - name: Test progress contract
+        run: cargo test -p scoutchain-progress
+
+      - name: Test scout_access contract
+        run: cargo test -p scoutchain-scout-access
 
       - name: Build WASM (release)
         run: cargo build --workspace --target wasm32-unknown-unknown --release
