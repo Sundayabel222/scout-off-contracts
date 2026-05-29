@@ -57,8 +57,16 @@ impl ProgressContract {
     // Progress updates
     // -------------------------------------------------------------------------
 
+    /// Register the verification contract address (admin only).
+    /// After this is set, `advance_level` will only accept calls from this address.
+    pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::VerificationContract, &addr);
+        Ok(())
+    }
+
     /// Advance a player's progress level by one tier.
-    /// Caller must be an authorized validator (or scout for Level 3).
+    /// May only be called by the registered verification contract.
     /// `milestone_ref` links back to the verification contract's milestone index.
     pub fn advance_level(
         env: Env,
@@ -68,6 +76,14 @@ impl ProgressContract {
     ) -> Result<ProgressLevel, ProgressError> {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+
+        let verification: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerificationContract)
+            .ok_or(ProgressError::Unauthorized)?;
+        verification.require_auth();
+
         caller.require_auth();
 
         let current = Self::get_current_level(&env, player_id);
@@ -202,11 +218,21 @@ mod tests {
         (env, client)
     }
 
+    fn init_and_link(
+        env: &Env,
+        client: &ProgressContractClient<'static>,
+    ) -> Address {
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        let verification_id = Address::generate(env);
+        client.set_verification_contract(&verification_id);
+        verification_id
+    }
+
     #[test]
     fn test_advance_level_sequence() {
         let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
+        init_and_link(&env, &client);
 
         let validator = Address::generate(&env);
         let player_id = 1u64;
@@ -230,8 +256,7 @@ mod tests {
     #[should_panic]
     fn test_cannot_exceed_elite_tier() {
         let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
+        init_and_link(&env, &client);
 
         let validator = Address::generate(&env);
         let player_id = 1u64;
@@ -241,6 +266,18 @@ mod tests {
         client.advance_level(&validator, &player_id, &3u32);
         // This should panic — already at EliteTier
         client.advance_level(&validator, &player_id, &4u32);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_advance_level_rejects_direct_call() {
+        let (env, client) = setup();
+        init_and_link(&env, &client);
+
+        // Clear all mocks — no auth satisfied, so verification.require_auth fails
+        env.mock_auths(&[]);
+        let validator = Address::generate(&env);
+        client.advance_level(&validator, &1u64, &1u32);
     }
 
     #[test]
