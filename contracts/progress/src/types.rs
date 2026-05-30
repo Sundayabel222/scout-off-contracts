@@ -18,15 +18,28 @@ pub struct ProgressEntry {
 
 #[contracttype]
 pub enum DataKey {
+    /// The `Address` of the contract administrator. Set during `initialize` and
+    /// updated by `transfer_admin`. Required for all privileged operations.
     Admin,
+    /// Boolean flag (`true`) written during `initialize`. Absence or `false`
+    /// means the contract has not yet been set up; `health()` reads this key.
     Initialized,
+    /// Boolean flag indicating whether the contract is currently paused.
+    /// `true` blocks all state-changing operations; `false` allows them.
+    /// Toggled by `pause_contract` / `unpause_contract`.
     Paused,
-    /// player_id → current ProgressLevel
+    /// Maps a `player_id` (`u64`) to the player's current [`ProgressLevel`].
+    /// Absent until the player's first level advancement; defaults to
+    /// [`ProgressLevel::Unverified`] when read.
     PlayerLevel(u64),
-    /// history counter per player
+    /// Tracks the total number of history entries recorded for a given
+    /// `player_id`. Acts as a monotonically increasing counter; the current
+    /// value is also the index of the most-recent [`HistoryEntry`].
     HistoryCounter(u64),
-    /// (player_id, history_index) → ProgressEntry
+    /// Stores a [`ProgressEntry`] for a specific `(player_id, history_index)`
+    /// pair. Indices start at `1` and are assigned by [`HistoryCounter`].
     HistoryEntry(u64, u32),
-    /// address of the verification contract (for cross-contract auth checks)
+    /// The `Address` of the companion verification contract. Reserved for
+    /// future cross-contract authorisation checks; not yet written at runtime.
     VerificationContract,
 }
