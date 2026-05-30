@@ -103,7 +103,9 @@ impl ProgressContract {
             .persistent()
             .get(&history_key)
             .unwrap_or(0u32);
-        let next_index = index.checked_add(1).expect("overflow");
+        let next_index = index
+            .checked_add(1)
+            .ok_or(ProgressError::Overflow)?;
 
         let entry = ProgressEntry {
             player_id,
@@ -343,5 +345,24 @@ mod tests {
         let player_id = 1u64;
         let level = client.advance_level(&verification_contract, &player_id, &1u32);
         assert_eq!(level, ProgressLevel::VerifiedIdentity);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #8)")]
+    fn test_advance_level_history_counter_overflow() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let caller = Address::generate(&env);
+        let player_id = 1u64;
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::HistoryCounter(player_id), &u32::MAX);
+        });
+
+        client.advance_level(&caller, &player_id, &1u32);
     }
 }
