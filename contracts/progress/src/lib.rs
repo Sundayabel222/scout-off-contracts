@@ -202,6 +202,15 @@ mod tests {
     }
 
     #[test]
+    fn test_health_false_before_initialize() {
+        let env = Env::default();
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+        // No initialize() call — health() must report false
+        assert!(!client.health());
+    }
+
+    #[test]
     fn test_advance_level_sequence() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
