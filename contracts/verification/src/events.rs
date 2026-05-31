@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env, String, Symbol};
 
 pub fn milestone_approved(
     env: &Env,
@@ -25,9 +25,9 @@ pub fn validator_registered(env: &Env, wallet: &Address) {
     );
 }
 
-pub fn validator_revoked(env: &Env, wallet: &Address) {
+pub fn validator_revoked(env: &Env, wallet: &Address, reason: &String) {
     env.events().publish(
         (Symbol::new(env, "validator_revoked"),),
-        wallet.clone(),
+        (wallet.clone(), reason.clone()),
     );
 }
