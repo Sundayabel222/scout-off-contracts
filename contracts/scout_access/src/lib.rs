@@ -103,7 +103,7 @@ impl ScoutAccessContract {
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0i128);
         if fees == 0 {
-            return Ok(0);
+            return Err(ScoutAccessError::InsufficientFee);
         }
         let xlm = Self::xlm_token(&env);
         let contract_addr = env.current_contract_address();
@@ -717,5 +717,33 @@ mod tests {
 
         // 8. Asserts the subscription duration is active.
         assert!(sub.expires_at > sub.subscribed_at);
+    }
+
+    #[test]
+    fn test_withdraw_fees_success() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        // Accumulate some fees
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        assert_eq!(client.get_accumulated_fees(), 1_000_000);
+
+        let recipient = Address::generate(&env);
+        let withdrawn = client.withdraw_fees(&recipient);
+        assert_eq!(withdrawn, 1_000_000);
+        assert_eq!(client.get_accumulated_fees(), 0);
+
+        let token_client = TokenClient::new(&env, &xlm);
+        assert_eq!(token_client.balance(&recipient), 1_000_000);
+    }
+
+    #[test]
+    fn test_withdraw_fees_insufficient() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let recipient = Address::generate(&env);
+        // Should return InsufficientFee since fees are 0
+        let result = client.try_withdraw_fees(&recipient);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InsufficientFee)));
     }
 }
