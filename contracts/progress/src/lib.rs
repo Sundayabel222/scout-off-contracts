@@ -7,6 +7,9 @@ use types::{DataKey, ProgressEntry, ProgressLevel};
 
 use soroban_sdk::{contract, contractimpl, Address, Env};
 
+const PERSISTENT_TTL_MIN: u32 = 500;
+const PERSISTENT_TTL_MAX: u32 = 2000;
+
 #[contract]
 pub struct ProgressContract;
 
@@ -102,6 +105,16 @@ impl ProgressContract {
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &new_level);
 
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::PlayerLevel(player_id), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::HistoryEntry(player_id, next_index), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
         events::progress_updated(&env, player_id, &new_level, &caller);
         Ok(new_level)
     }
@@ -111,7 +124,11 @@ impl ProgressContract {
     // -------------------------------------------------------------------------
 
     pub fn get_level(env: Env, player_id: u64) -> ProgressLevel {
-        Self::get_current_level(&env, player_id)
+        let level = Self::get_current_level(&env, player_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::PlayerLevel(player_id), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        level
     }
 
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
@@ -126,10 +143,15 @@ impl ProgressContract {
         player_id: u64,
         index: u32,
     ) -> Result<ProgressEntry, ProgressError> {
-        env.storage()
+        let entry = env
+            .storage()
             .persistent()
             .get(&DataKey::HistoryEntry(player_id, index))
-            .ok_or(ProgressError::PlayerNotFound)
+            .ok_or(ProgressError::PlayerNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::HistoryEntry(player_id, index), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(entry)
     }
 
     pub fn health(env: Env) -> bool {
@@ -278,5 +300,47 @@ mod tests {
         // Clear mocks — old admin auth no longer stored, so pause must fail
         env.mock_auths(&[]);
         client.pause_contract();
+    }
+
+    #[test]
+    fn test_player_level_and_history_accessible_after_ledger_advancement() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Start at a known ledger sequence so TTL arithmetic is predictable.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+            l.min_persistent_entry_ttl = 200;
+            l.max_entry_ttl = 10_000;
+        });
+
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id = 42u64;
+
+        // Advance to VerifiedIdentity — writes PlayerLevel + HistoryEntry and
+        // extends both to PERSISTENT_TTL_MAX (2000 ledgers).
+        client.advance_level(&validator, &player_id, &1u32);
+
+        // Advance the ledger well past the default min_persistent_entry_ttl (200)
+        // but within PERSISTENT_TTL_MAX (2000). Both entries must still be live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000 + 500;
+        });
+
+        // get_level must succeed and re-extend PlayerLevel TTL.
+        let level = client.get_level(&player_id);
+        assert_eq!(level, ProgressLevel::VerifiedIdentity);
+
+        // get_history_entry must succeed and re-extend HistoryEntry TTL.
+        let entry = client.get_history_entry(&player_id, &1u32);
+        assert_eq!(entry.player_id, player_id);
+        assert_eq!(entry.new_level, ProgressLevel::VerifiedIdentity);
+        assert_eq!(entry.milestone_ref, 1);
     }
 }
