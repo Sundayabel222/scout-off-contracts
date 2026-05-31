@@ -5,7 +5,7 @@ mod types;
 use errors::ProgressError;
 use types::{DataKey, ProgressEntry, ProgressLevel};
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
 
 #[contract]
 pub struct ProgressContract;
@@ -130,6 +130,34 @@ impl ProgressContract {
             .persistent()
             .get(&DataKey::HistoryEntry(player_id, index))
             .ok_or(ProgressError::PlayerNotFound)
+    }
+
+    /// Return all history entries for a player in chronological order (index 1..=N).
+    /// Capped at 50 entries to bound gas consumption.
+    /// Returns an empty Vec if the player has no history.
+    pub fn get_progress_history(env: Env, player_id: u64) -> Vec<ProgressEntry> {
+        const MAX_ENTRIES: u32 = 50;
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::HistoryCounter(player_id))
+            .unwrap_or(0u32);
+
+        let limit = count.min(MAX_ENTRIES);
+        let mut entries: Vec<ProgressEntry> = Vec::new(&env);
+
+        for i in 1..=limit {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get(&DataKey::HistoryEntry(player_id, i))
+            {
+                entries.push_back(entry);
+            }
+        }
+
+        entries
     }
 
     pub fn health(env: Env) -> bool {
@@ -262,6 +290,51 @@ mod tests {
             result,
             Err(Ok(ProgressError::NotInitialized))
         );
+    }
+
+    #[test]
+    fn test_get_progress_history_three_entries() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id = 10u64;
+
+        // Advance through all three tiers
+        client.advance_level(&validator, &player_id, &1u32);
+        client.advance_level(&validator, &player_id, &2u32);
+        client.advance_level(&validator, &player_id, &3u32);
+
+        let history = client.get_progress_history(&player_id);
+
+        assert_eq!(history.len(), 3);
+
+        // Entry 1: Unverified → VerifiedIdentity
+        assert_eq!(history.get(0).unwrap().old_level, ProgressLevel::Unverified);
+        assert_eq!(history.get(0).unwrap().new_level, ProgressLevel::VerifiedIdentity);
+        assert_eq!(history.get(0).unwrap().milestone_ref, 1u32);
+
+        // Entry 2: VerifiedIdentity → PerformanceMilestones
+        assert_eq!(history.get(1).unwrap().old_level, ProgressLevel::VerifiedIdentity);
+        assert_eq!(history.get(1).unwrap().new_level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(history.get(1).unwrap().milestone_ref, 2u32);
+
+        // Entry 3: PerformanceMilestones → EliteTier
+        assert_eq!(history.get(2).unwrap().old_level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(history.get(2).unwrap().new_level, ProgressLevel::EliteTier);
+        assert_eq!(history.get(2).unwrap().milestone_ref, 3u32);
+    }
+
+    #[test]
+    fn test_get_progress_history_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Player 999 has never had advance_level called
+        let history = client.get_progress_history(&999u64);
+        assert_eq!(history.len(), 0);
     }
 
     #[test]
