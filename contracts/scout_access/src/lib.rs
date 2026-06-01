@@ -41,7 +41,9 @@ impl ScoutAccessContract {
 
     pub fn update_fee_config(env: Env, fee_config: FeeConfig) -> Result<(), ScoutAccessError> {
         Self::require_admin(&env)?;
+        let old_config = Self::fee_config(&env);
         env.storage().instance().set(&DataKey::FeeConfig, &fee_config);
+        events::fee_config_updated(&env, &old_config, &fee_config);
         Ok(())
     }
 
@@ -446,6 +448,56 @@ mod tests {
     fn test_initialize_and_health() {
         let (_, _, _, _, client) = setup();
         assert!(client.health());
+    }
+
+    #[test]
+    fn test_fee_config_updated_event_contains_old_and_new_config() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+
+        let new_fees = FeeConfig {
+            contact_fee_stroops: 200_000,
+            basic_sub_stroops: 2_000_000,
+            pro_sub_stroops: 5_000_000,
+            elite_sub_stroops: 10_000_000,
+            sub_duration_secs: 60 * 24 * 60 * 60,
+        };
+
+        client.update_fee_config(&new_fees);
+
+        // Locate the fee_config_updated event.
+        let events = env.events().all();
+        let cfg_event = events.iter().find(|(_, topics, _)| {
+            if let Some(first) = topics.first() {
+                if let Ok(sym) = Symbol::try_from_val(&env, &first) {
+                    return sym == Symbol::new(&env, "fee_config_updated");
+                }
+            }
+            false
+        });
+
+        let (_, _, data) = cfg_event.expect("fee_config_updated event not found");
+        // Data is published as (old_config: FeeConfig, new_config: FeeConfig).
+        let (old_config, emitted_new): (FeeConfig, FeeConfig) =
+            soroban_sdk::FromVal::from_val(&env, &data);
+
+        // Old config must match the defaults set during setup.
+        let defaults = default_fees();
+        assert_eq!(old_config.contact_fee_stroops, defaults.contact_fee_stroops);
+        assert_eq!(old_config.basic_sub_stroops,   defaults.basic_sub_stroops);
+        assert_eq!(old_config.pro_sub_stroops,     defaults.pro_sub_stroops);
+        assert_eq!(old_config.elite_sub_stroops,   defaults.elite_sub_stroops);
+        assert_eq!(old_config.sub_duration_secs,   defaults.sub_duration_secs);
+
+        // New config must match what was passed to update_fee_config.
+        assert_eq!(emitted_new.contact_fee_stroops, new_fees.contact_fee_stroops);
+        assert_eq!(emitted_new.basic_sub_stroops,   new_fees.basic_sub_stroops);
+        assert_eq!(emitted_new.pro_sub_stroops,     new_fees.pro_sub_stroops);
+        assert_eq!(emitted_new.elite_sub_stroops,   new_fees.elite_sub_stroops);
+        assert_eq!(emitted_new.sub_duration_secs,   new_fees.sub_duration_secs);
+
+        // Storage must reflect the new config.
+        let stored = client.get_fee_config();
+        assert_eq!(stored.contact_fee_stroops, new_fees.contact_fee_stroops);
     }
 
     #[test]
