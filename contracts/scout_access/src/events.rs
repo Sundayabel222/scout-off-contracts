@@ -1,7 +1,14 @@
 use soroban_sdk::{Address, Env, Symbol};
 use crate::types::{FeeConfig, SubscriptionTier};
 
-pub fn scout_subscribed(env: &Env, scout: &Address, tier: &SubscriptionTier, fee_paid: i128) {
+pub fn contract_initialized(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "contract_initialized"), admin.clone()),
+        admin.clone(),
+    );
+}
+
+pub fn scout_subscribed(env: &Env, scout: &Address, tier: &SubscriptionTier) {
     env.events().publish(
         (Symbol::new(env, "scout_subscribed"), scout.clone()),
         (tier.clone(), fee_paid),
@@ -29,9 +36,16 @@ pub fn fees_withdrawn(env: &Env, to: &Address, amount: i128) {
     );
 }
 
-pub fn fee_config_updated(env: &Env, old_config: &FeeConfig, new_config: &FeeConfig) {
+pub fn contract_paused(env: &Env, admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "fee_config_updated"),),
-        (old_config.clone(), new_config.clone()),
+        (Symbol::new(env, "contract_paused"),),
+        admin.clone(),
+    );
+}
+
+pub fn contract_unpaused(env: &Env, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "contract_unpaused"),),
+        admin.clone(),
     );
 }
