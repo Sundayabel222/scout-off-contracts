@@ -20,6 +20,8 @@ use types::{ContractHealth, DataKey, Milestone, Validator};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String};
 
+const MAX_CREDENTIALS_LEN: u32 = 256;
+
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
 // `set_progress_contract` before `approve_milestone` can advance levels.
@@ -117,6 +119,10 @@ impl VerificationContract {
     ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         Self::require_not_paused(&env)?;
+
+        if credentials.len() > MAX_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
 
         if env
             .storage()
@@ -739,5 +745,36 @@ mod tests {
         client.set_progress_contract(&addr1);
         // update should succeed without error
         client.update_progress_contract(&addr2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Credentials length boundary tests (MAX_CREDENTIALS_LEN = 256)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_register_validator_credentials_257_bytes_fails() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        // 257 ASCII bytes — must exceed the 256-byte limit
+        let too_long = "a".repeat(257);
+        client.register_validator(&validator, &String::from_str(&env, &too_long));
+    }
+
+    #[test]
+    fn test_register_validator_credentials_256_bytes_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        // Exactly 256 ASCII bytes — must be accepted
+        let exactly_256 = "a".repeat(256);
+        client.register_validator(&validator, &String::from_str(&env, &exactly_256));
+
+        assert!(client.is_active_validator(&validator));
     }
 }
