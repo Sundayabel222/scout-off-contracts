@@ -52,6 +52,33 @@ impl ProgressContract {
         Ok(())
     }
 
+    /// Reset a player's level for dispute resolution.
+    /// Existing history is preserved; a new history entry records the reset.
+    pub fn reset_player_level(
+        env: Env,
+        player_id: u64,
+        target_level: ProgressLevel,
+    ) -> Result<(), ProgressError> {
+        Self::require_not_paused(&env)?;
+        let admin = Self::require_admin(&env)?;
+
+        let old_level = Self::get_current_level(&env, player_id);
+        Self::record_progress_entry(
+            &env,
+            player_id,
+            old_level.clone(),
+            target_level.clone(),
+            admin,
+            0,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::PlayerLevel(player_id), &target_level);
+
+        events::player_level_reset(&env, player_id, &old_level, &target_level);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Progress updates
     // -------------------------------------------------------------------------
@@ -70,34 +97,16 @@ impl ProgressContract {
         caller.require_auth();
 
         let current = Self::get_current_level(&env, player_id);
-        let new_level = current
-            .next()
-            .ok_or(ProgressError::AlreadyAtMaxLevel)?;
+        let new_level = current.next().ok_or(ProgressError::AlreadyAtMaxLevel)?;
 
-        // Record history entry
-        let history_key = DataKey::HistoryCounter(player_id);
-        let index: u32 = env
-            .storage()
-            .persistent()
-            .get(&history_key)
-            .unwrap_or(0u32);
-        let next_index = index.checked_add(1).expect("overflow");
-
-        let entry = ProgressEntry {
+        Self::record_progress_entry(
+            &env,
             player_id,
-            old_level: current,
-            new_level: new_level.clone(),
-            updated_by: caller.clone(),
-            updated_at: env.ledger().timestamp(),
+            current,
+            new_level.clone(),
+            caller.clone(),
             milestone_ref,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::HistoryEntry(player_id, next_index), &entry);
-        env.storage()
-            .persistent()
-            .set(&history_key, &next_index);
+        );
         env.storage()
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &new_level);
@@ -150,6 +159,33 @@ impl ProgressContract {
             .unwrap_or(ProgressLevel::Unverified)
     }
 
+    fn record_progress_entry(
+        env: &Env,
+        player_id: u64,
+        old_level: ProgressLevel,
+        new_level: ProgressLevel,
+        updated_by: Address,
+        milestone_ref: u32,
+    ) {
+        let history_key = DataKey::HistoryCounter(player_id);
+        let index: u32 = env.storage().persistent().get(&history_key).unwrap_or(0u32);
+        let next_index = index.checked_add(1).expect("overflow");
+
+        let entry = ProgressEntry {
+            player_id,
+            old_level,
+            new_level,
+            updated_by,
+            updated_at: env.ledger().timestamp(),
+            milestone_ref,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::HistoryEntry(player_id, next_index), &entry);
+        env.storage().persistent().set(&history_key, &next_index);
+    }
+
     fn require_initialized(env: &Env) -> Result<(), ProgressError> {
         if !env
             .storage()
@@ -174,14 +210,14 @@ impl ProgressContract {
         Ok(())
     }
 
-    fn require_admin(env: &Env) -> Result<(), ProgressError> {
+    fn require_admin(env: &Env) -> Result<Address, ProgressError> {
         let admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .ok_or(ProgressError::NotInitialized)?;
         admin.require_auth();
-        Ok(())
+        Ok(admin)
     }
 }
 
@@ -191,7 +227,10 @@ impl ProgressContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        vec, Env, IntoVal, Symbol,
+    };
 
     fn setup() -> (Env, ProgressContractClient<'static>) {
         let env = Env::default();
@@ -278,5 +317,58 @@ mod tests {
         // Clear mocks — old admin auth no longer stored, so pause must fail
         env.mock_auths(&[]);
         client.pause_contract();
+    }
+
+    #[test]
+    fn test_reset_player_level_success() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id = 1u64;
+
+        client.advance_level(&validator, &player_id, &1u32);
+        client.advance_level(&validator, &player_id, &2u32);
+        assert_eq!(client.get_history_count(&player_id), 2);
+
+        client.reset_player_level(&player_id, &ProgressLevel::Unverified);
+
+        assert_eq!(
+            env.events().all(),
+            vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "player_level_reset"),).into_val(&env),
+                    (
+                        player_id,
+                        ProgressLevel::PerformanceMilestones,
+                        ProgressLevel::Unverified,
+                    )
+                        .into_val(&env),
+                ),
+            ]
+        );
+
+        assert_eq!(client.get_level(&player_id), ProgressLevel::Unverified);
+        assert_eq!(client.get_history_count(&player_id), 3);
+
+        let reset_entry = client.get_history_entry(&player_id, &3u32);
+        assert_eq!(reset_entry.old_level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(reset_entry.new_level, ProgressLevel::Unverified);
+        assert_eq!(reset_entry.updated_by, admin);
+        assert_eq!(reset_entry.milestone_ref, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_reset_player_level_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        client.reset_player_level(&1u64, &ProgressLevel::Unverified);
     }
 }
