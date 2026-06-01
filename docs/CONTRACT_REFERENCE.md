@@ -108,6 +108,7 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `player_contacted` | event_name, scout_address | (player_id: u64, fee_paid: i128) | Emitted when a scout pays to unlock a player's contact details; includes the player id and fee charged in stroops |
 | `trial_offer_logged` | event_name, scout_address | player_id: u64 | Emitted when an Elite scout records a trial offer on-chain |
 | `fees_withdrawn` | event_name, to_address | amount: i128 | Emitted when the admin withdraws accumulated platform fees |
+| `fee_config_updated` | event_name | (old_config: FeeConfig, new_config: FeeConfig) | Emitted when the admin updates the fee configuration; includes both the previous and new config for audit |
 
 ---
 
@@ -135,3 +136,4 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `player_contacted` | scout_access | Scout pays to unlock player contact |
 | `trial_offer_logged` | scout_access | Scout records a trial offer |
 | `fees_withdrawn` | scout_access | Admin withdraws accumulated fees |
+| `fee_config_updated` | scout_access | Admin updates fee configuration — data: `(old_config: FeeConfig, new_config: FeeConfig)` |

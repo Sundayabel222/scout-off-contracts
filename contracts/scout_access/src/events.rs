@@ -1,5 +1,5 @@
 use soroban_sdk::{Address, Env, Symbol};
-use crate::types::SubscriptionTier;
+use crate::types::{FeeConfig, SubscriptionTier};
 
 pub fn contract_initialized(env: &Env, admin: &Address) {
     env.events().publish(
