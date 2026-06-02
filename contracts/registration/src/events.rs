@@ -20,3 +20,17 @@ pub fn profile_updated(env: &Env, player_id: u64) {
         player_id,
     );
 }
+
+pub fn player_deregistered(env: &Env, player_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "player_deregistered"),),
+        player_id,
+    );
+}
+
+pub fn player_level_synced(env: &Env, player_id: u64) {
+    env.events().publish(
+        (Symbol::new(env, "player_level_synced"),),
+        player_id,
+    );
+}
