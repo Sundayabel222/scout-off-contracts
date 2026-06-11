@@ -55,7 +55,7 @@ mod progress_contract {
 #[cfg(target_family = "wasm")]
 mod progress_contract {
     soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/scoutchain_progress.wasm"
+        file = "../../target/wasm32v1-none/release/scoutchain_progress.wasm"
     );
 }
 
