@@ -1,3 +1,4 @@
+#![no_std]
 // IMPORTANT: Cross-contract wiring required after deployment
 //
 // `approve_milestone` calls `advance_level` on the progress contract to update

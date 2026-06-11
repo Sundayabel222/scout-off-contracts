@@ -1,3 +1,4 @@
+#![no_std]
 use soroban_sdk::contracttype;
 
 /// Four-tier progress level for a player profile
