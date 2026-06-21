@@ -3,13 +3,14 @@ mod events;
 mod types;
 
 use errors::ScoutChainError;
-use types::{DataKey, PlayerProfile, PlayerVitals, ProgressLevel, ScoutProfile};
+use types::{DataKey, PlayerProfile, PlayerSummary, PlayerVitals, ProgressLevel, ScoutProfile};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 const MAX_STRING_LEN: u32 = 64;
 const MAX_REGION_LEN: u32 = 128;
 const MAX_IPFS_HASHES: u32 = 10;
+const MAX_BATCH_SIZE: u32 = 20;
 
 #[contract]
 pub struct RegistrationContract;
@@ -196,6 +197,33 @@ impl RegistrationContract {
         Self::load_player(&env, player_id)
     }
 
+    /// Return a lightweight player summary without IPFS hashes or wallet.
+    pub fn get_player_summary(
+        env: Env,
+        player_id: u64,
+    ) -> Result<PlayerSummary, ScoutChainError> {
+        let profile = Self::load_player(&env, player_id)?;
+        Ok(Self::to_player_summary(&profile))
+    }
+
+    /// Batch-fetch player summaries for up to 20 IDs in a single call.
+    /// Missing IDs are skipped (partial hits).
+    pub fn get_players(env: Env, ids: Vec<u64>) -> Result<Vec<PlayerSummary>, ScoutChainError> {
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(ScoutChainError::InvalidInput);
+        }
+
+        let mut summaries = Vec::new(&env);
+        for i in 0..ids.len() {
+            if let Some(id) = ids.get(i) {
+                if let Ok(profile) = Self::load_player(&env, id) {
+                    summaries.push_back(Self::to_player_summary(&profile));
+                }
+            }
+        }
+        Ok(summaries)
+    }
+
     pub fn get_player_by_wallet(
         env: Env,
         wallet: Address,
@@ -295,6 +323,15 @@ impl RegistrationContract {
             .persistent()
             .get(&DataKey::Player(player_id))
             .ok_or(ScoutChainError::PlayerNotFound)
+    }
+
+    fn to_player_summary(profile: &PlayerProfile) -> PlayerSummary {
+        PlayerSummary {
+            player_id: profile.player_id,
+            vitals: profile.vitals.clone(),
+            level: profile.level.clone(),
+            updated_at: profile.updated_at,
+        }
     }
 
     fn next_player_id(env: &Env) -> Result<u64, ScoutChainError> {
@@ -683,5 +720,96 @@ mod tests {
         }
 
         assert_eq!(client.get_scout_count(), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #260: batch player summary queries
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_player_summary_excludes_ipfs_hashes() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmHeavyMedia")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        let summary = client.get_player_summary(&player_id);
+        let profile = client.get_player(&player_id);
+        assert_eq!(summary.player_id, player_id);
+        assert_eq!(summary.vitals.position, vitals.position);
+        assert_eq!(summary.vitals.region, vitals.region);
+        assert_eq!(summary.level, ProgressLevel::Unverified);
+        assert_eq!(summary.updated_at, profile.updated_at);
+    }
+
+    #[test]
+    fn test_get_players_batch_fetch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        let id1 = client.register_player(&Address::generate(&env), &vitals, &hashes);
+        let id2 = client.register_player(&Address::generate(&env), &vitals, &hashes);
+        let id3 = client.register_player(&Address::generate(&env), &vitals, &hashes);
+
+        let ids = vec![&env, id1, id2, id3];
+        let summaries = client.get_players(&ids);
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries.get(0).unwrap().player_id, id1);
+        assert_eq!(summaries.get(1).unwrap().player_id, id2);
+        assert_eq!(summaries.get(2).unwrap().player_id, id3);
+    }
+
+    #[test]
+    fn test_get_players_partial_hits() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let id1 = client.register_player(&Address::generate(&env), &vitals, &hashes);
+        let id2 = client.register_player(&Address::generate(&env), &vitals, &hashes);
+
+        let ids = vec![&env, id1, 999u64, id2];
+        let summaries = client.get_players(&ids);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries.get(0).unwrap().player_id, id1);
+        assert_eq!(summaries.get(1).unwrap().player_id, id2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #13)")]
+    fn test_get_players_batch_size_cap() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let mut ids = Vec::new(&env);
+        for i in 1..=21u64 {
+            ids.push_back(i);
+        }
+        client.get_players(&ids);
+    }
+
+    #[test]
+    fn test_get_players_max_batch_size_ok() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let mut ids = Vec::new(&env);
+        for i in 1..=20u64 {
+            ids.push_back(i);
+        }
+        let summaries = client.get_players(&ids);
+        assert_eq!(summaries.len(), 0);
     }
 }
