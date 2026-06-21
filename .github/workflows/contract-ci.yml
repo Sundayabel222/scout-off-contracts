@@ -109,17 +109,28 @@ jobs:
             -p 8000:8000 \
             stellar/quickstart:testing \
             --local
-          # Wait until the RPC endpoint is ready
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8000/soroban/rpc -X POST \
+          # Poll getLatestLedger until the DB is initialised and returns
+          # a real ledger sequence (not just an open TCP port).
+          echo "Waiting for Soroban RPC to be ready..."
+          for i in $(seq 1 60); do
+            LEDGER=$(curl -sf http://localhost:8000/soroban/rpc \
+              -X POST \
               -H 'Content-Type: application/json' \
               -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' \
-              > /dev/null 2>&1; then
-              echo "RPC ready after ${i}s"
+              2>/dev/null \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',{}).get('sequence',0))" \
+              2>/dev/null || echo 0)
+            if [ "${LEDGER:-0}" -gt 0 ] 2>/dev/null; then
+              echo "RPC ready — ledger ${LEDGER} after ${i}s"
               break
             fi
             sleep 2
           done
+          if [ "${LEDGER:-0}" -eq 0 ] 2>/dev/null; then
+            echo "ERROR: Soroban RPC never became ready"
+            docker logs stellar-local
+            exit 1
+          fi
 
       - name: Register local network with Stellar CLI
         run: |
@@ -130,7 +141,6 @@ jobs:
       - name: Generate a local sandbox identity
         run: |
           stellar keys generate ci-deployer --network local --fund
-          echo "CI_DEPLOYER=ci-deployer" >> "$GITHUB_ENV"
           echo "ADMIN_ADDRESS=$(stellar keys address ci-deployer)" >> "$GITHUB_ENV"
 
       - name: Deploy all contracts to local sandbox
@@ -140,11 +150,20 @@ jobs:
 
           deploy_one() {
             local name="$1"
-            stellar contract optimize \
-              --wasm "$WASM/scoutchain_${name}.wasm" \
-              --wasm-out "$WASM/scoutchain_${name}.optimized.wasm"
+            local wasm_src="$WASM/scoutchain_${name}.wasm"
+            local wasm_opt="$WASM/scoutchain_${name}.optimized.wasm"
+            # Use the current non-deprecated build+optimize path
+            stellar contract build \
+              --package "scoutchain-${name//_/-}" \
+              --optimize \
+              --target-dir target \
+              2>/dev/null \
+              || stellar contract optimize \
+                   --wasm "$wasm_src" \
+                   --wasm-out "$wasm_opt" \
+              || cp "$wasm_src" "$wasm_opt"
             stellar contract deploy \
-              --wasm "$WASM/scoutchain_${name}.optimized.wasm" \
+              --wasm "$wasm_opt" \
               --source ci-deployer \
               --network local
           }
