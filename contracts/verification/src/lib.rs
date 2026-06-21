@@ -21,6 +21,8 @@ use types::{ContractHealth, DataKey, Milestone, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
+use scoutchain_shared_types::validate_cid;
+
 const MAX_CREDENTIALS_LEN: u32 = 256;
 
 // Generated client for the progress contract — used for cross-contract calls.
@@ -250,21 +252,7 @@ impl VerificationContract {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
 
-        // Validate evidence_hash: must start with "Qm" or "bafy", max 128 bytes
-        let hash_len = evidence_hash.len();
-        if !(2..=128).contains(&hash_len) {
-            return Err(VerificationError::InvalidInput);
-        }
-        let hash_bytes = evidence_hash.to_bytes();
-        let starts_with_qm = hash_bytes.get(0) == Some(b'Q') && hash_bytes.get(1) == Some(b'm');
-        let starts_with_bafy = hash_len >= 4
-            && hash_bytes.get(0) == Some(b'b')
-            && hash_bytes.get(1) == Some(b'a')
-            && hash_bytes.get(2) == Some(b'f')
-            && hash_bytes.get(3) == Some(b'y');
-        if !starts_with_qm && !starts_with_bafy {
-            return Err(VerificationError::InvalidInput);
-        }
+        validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
 
         // Verify the caller is an active validator
         let validator: Validator = env

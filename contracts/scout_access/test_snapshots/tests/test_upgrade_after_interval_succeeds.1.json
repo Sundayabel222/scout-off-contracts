@@ -128,7 +128,7 @@
                 {
                   "vec": [
                     {
-                      "symbol": "Pro"
+                      "symbol": "Basic"
                     }
                   ]
                 }
@@ -149,7 +149,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                     },
                     {
-                      "i128": "3000000"
+                      "i128": "1000000"
                     }
                   ]
                 }
@@ -388,7 +388,7 @@
                         ]
                       },
                       "val": {
-                        "i128": "10000000"
+                        "i128": "8000000"
                       }
                     },
                     {
@@ -566,7 +566,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "10000000"
+                      "i128": "8000000"
                     }
                   },
                   {
@@ -618,7 +618,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "90000000"
+                      "i128": "92000000"
                     }
                   },
                   {
