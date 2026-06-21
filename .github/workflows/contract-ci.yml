@@ -52,6 +52,7 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
       - name: Format check
         run: cargo fmt --all -- --check
+
       - name: Shell script lint (shellcheck)
         run: |
           sudo apt-get install -y shellcheck
@@ -196,3 +197,7 @@ jobs:
       - name: Stop local sandbox
         if: always()
         run: docker stop stellar-local && docker rm stellar-local || true
+
+      - name: Docs completeness check
+        run: bash scripts/check-docs.sh
+

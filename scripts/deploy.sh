@@ -11,6 +11,16 @@ if [[ -z "$DEPLOYER" ]]; then
   exit 1
 fi
 
+# Mainnet safety check: verify config file has no placeholders
+if [[ "$NETWORK" == "mainnet" ]]; then
+  if grep -q "FILL_IN_BEFORE_USE" config/mainnet.json; then
+    echo "ERROR: config/mainnet.json contains placeholder values (FILL_IN_BEFORE_USE)"
+    echo "Before deploying to mainnet, update config/mainnet.json with real values."
+    exit 1
+  fi
+fi
+
+WASM_DIR="target/wasm32-unknown-unknown/release"
 WASM_DIR="target/wasm32v1-none/release"
 
 echo "==> Building contracts..."

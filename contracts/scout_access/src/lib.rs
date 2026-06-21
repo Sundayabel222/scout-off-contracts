@@ -68,6 +68,10 @@ const PERSISTENT_TTL_MAX: u32 = 2_000;
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
 
+// Minimum interval (seconds) between subscribe calls for the same scout
+// to prevent race conditions / double-charging on rapid upgrades.
+const MIN_UPGRADE_INTERVAL_SECS: u64 = 3600;
+
 #[contract]
 pub struct ScoutAccessContract;
 
@@ -129,7 +133,7 @@ impl ScoutAccessContract {
             .get(&DataKey::AccumulatedFees)
             .unwrap_or(0i128);
         if fees == 0 {
-            return Err(ScoutAccessError::InsufficientFee);
+            return Err(ScoutAccessError::NoFeesToWithdraw);
         }
         let xlm = Self::get_token(&env);
         let contract_addr = env.current_contract_address();
@@ -178,11 +182,39 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Emergency refund: admin returns `amount` XLM (stroops) from the
+    /// contract balance to `scout`.  Use when a scout is accidentally
+    /// double-charged (e.g. by the race condition this interval guard
+    /// is designed to prevent).
+    pub fn refund_subscription(
+        env: Env,
+        scout: Address,
+        amount: i128,
+    ) -> Result<(), ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_admin(&env)?;
+        if amount <= 0 {
+            return Err(ScoutAccessError::InvalidInput);
+        }
+        let xlm = Self::get_token(&env);
+        let contract_addr = env.current_contract_address();
+        token::Client::new(&env, &xlm).transfer(&contract_addr, &scout, &amount);
+        events::subscription_refunded(&env, &scout, amount);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Scout subscription
     // -------------------------------------------------------------------------
 
-    /// Purchase a scout subscription. Scout must pre-approve the XLM transfer.
+    /// Purchase a scout subscription.
+    ///
+    /// Payment flow:
+    /// 1. Transfer XLM from scout to contract via `token::Client::transfer`.
+    /// 2. Add fee to `AccumulatedFees` in instance storage.
+    /// 3. Write `Subscription` record to persistent storage.
+    ///
+    /// Scout must pre-approve the XLM transfer. Downgrades before expiry are rejected.
     pub fn subscribe(
         env: Env,
         scout: Address,
@@ -197,15 +229,24 @@ impl ScoutAccessContract {
 
         // Downgrade guard: if an active subscription exists, only allow same
         // tier or an upgrade. Downgrades before expiry are rejected.
+        // Also enforce a minimum interval between subscribe calls to prevent
+        // race conditions / double-charging on rapid upgrades.
         if let Some(existing) = env
             .storage()
             .persistent()
             .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
         {
-            if now <= existing.expires_at
-                && Self::tier_rank(&tier) < Self::tier_rank(&existing.tier)
-            {
-                return Err(ScoutAccessError::SubscriptionDowngradeNotAllowed);
+            if now <= existing.expires_at {
+                if Self::tier_rank(&tier) < Self::tier_rank(&existing.tier) {
+                    return Err(ScoutAccessError::SubscriptionDowngradeNotAllowed);
+                }
+                let min_next = existing
+                    .subscribed_at
+                    .checked_add(MIN_UPGRADE_INTERVAL_SECS)
+                    .ok_or(ScoutAccessError::Overflow)?;
+                if now < min_next {
+                    return Err(ScoutAccessError::UpgradeTooSoon);
+                }
             }
         }
 
@@ -216,10 +257,7 @@ impl ScoutAccessContract {
             SubscriptionTier::Elite => config.elite_sub_stroops,
         };
 
-        let xlm = Self::get_token(&env);
-        let contract_addr = env.current_contract_address();
-        token::Client::new(&env, &xlm).transfer(&scout, &contract_addr, &fee);
-        Self::accumulate_fee(&env, fee)?;
+        Self::collect_fee(&env, &scout, fee)?;
 
         let sub = Subscription {
             scout: scout.clone(),
@@ -248,7 +286,13 @@ impl ScoutAccessContract {
     // -------------------------------------------------------------------------
 
     /// Pay a micro-fee to unlock a player's contact details.
-    /// Scout must have an active subscription.
+    ///
+    /// Payment flow:
+    /// 1. Transfer `contact_fee_stroops` XLM from scout to contract via `token::Client::transfer`.
+    /// 2. Add fee to `AccumulatedFees` in instance storage.
+    /// 3. Write contact record to persistent storage (prevents duplicate contacts).
+    ///
+    /// Scout must have an active, non-expired subscription.
     pub fn pay_to_contact(
         env: Env,
         scout: Address,
@@ -256,6 +300,7 @@ impl ScoutAccessContract {
     ) -> Result<(), ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
         scout.require_auth();
         Self::require_active_subscription(&env, &scout)?;
 
@@ -265,14 +310,7 @@ impl ScoutAccessContract {
         }
 
         let config = Self::fee_config(&env);
-        let xlm = Self::get_token(&env);
-        let contract_addr = env.current_contract_address();
-        token::Client::new(&env, &xlm).transfer(
-            &scout,
-            &contract_addr,
-            &config.contact_fee_stroops,
-        );
-        Self::accumulate_fee(&env, config.contact_fee_stroops)?;
+        Self::collect_fee(&env, &scout, config.contact_fee_stroops)?;
 
         env.storage().persistent().set(&contact_key, &true);
         env.storage()
@@ -542,6 +580,15 @@ impl ScoutAccessContract {
             .instance()
             .set(&DataKey::AccumulatedFees, &new_total);
         Ok(())
+    }
+
+    /// Transfer `amount` stroops from `payer` to this contract and add it to
+    /// `AccumulatedFees`. Both steps are atomic within the transaction.
+    fn collect_fee(env: &Env, payer: &Address, amount: i128) -> Result<(), ScoutAccessError> {
+        let xlm = Self::get_token(env);
+        let contract_addr = env.current_contract_address();
+        token::Client::new(env, &xlm).transfer(payer, &contract_addr, &amount);
+        Self::accumulate_fee(env, amount)
     }
 
     /// Validate that every fee field is positive and sub_duration_secs is non-zero.
@@ -943,7 +990,7 @@ mod tests {
         let (env, _admin, _xlm, _contract_id, client) = setup();
         let recipient = Address::generate(&env);
         let result = client.try_withdraw_fees(&recipient);
-        assert_eq!(result, Err(Ok(ScoutAccessError::InsufficientFee)));
+        assert_eq!(result, Err(Ok(ScoutAccessError::NoFeesToWithdraw)));
     }
 
     #[test]
@@ -1156,6 +1203,11 @@ mod tests {
         client.subscribe(&scout, &SubscriptionTier::Basic);
         let basic_sub = client.get_subscription(&scout);
 
+        // Advance past the minimum interval to allow the upgrade
+        env.ledger().with_mut(|l| {
+            l.timestamp += MIN_UPGRADE_INTERVAL_SECS + 1;
+        });
+
         client.subscribe(&scout, &SubscriptionTier::Elite);
         let elite_sub = client.get_subscription(&scout);
 
@@ -1170,6 +1222,12 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Advance past the minimum interval to allow the upgrade
+        env.ledger().with_mut(|l| {
+            l.timestamp += MIN_UPGRADE_INTERVAL_SECS + 1;
+        });
+
         client.subscribe(&scout, &SubscriptionTier::Elite);
 
         let sub = client.get_subscription(&scout);
@@ -1208,5 +1266,100 @@ mod tests {
 
         let result = client.try_subscribe(&scout, &SubscriptionTier::Pro);
         assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // Upgrade timing guard tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_rapid_upgrade_rejected() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        // Subscribe to Basic
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        // Attempt upgrade to Elite immediately — should be rejected
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Elite);
+        assert_eq!(result, Err(Ok(ScoutAccessError::UpgradeTooSoon)));
+    }
+
+    #[test]
+    fn test_rapid_same_tier_renewal_rejected() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Attempt same-tier renewal immediately — should be rejected
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Pro);
+        assert_eq!(result, Err(Ok(ScoutAccessError::UpgradeTooSoon)));
+    }
+
+    #[test]
+    fn test_upgrade_after_interval_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        // Advance time past the minimum interval
+        env.ledger().with_mut(|l| {
+            l.timestamp += MIN_UPGRADE_INTERVAL_SECS + 1;
+        });
+
+        // Upgrade should now succeed
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Elite);
+        assert!(result.is_ok());
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Elite);
+    }
+
+    // -------------------------------------------------------------------------
+    // refund_subscription tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_refund_subscription_success() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        let contract_balance_before = TokenClient::new(&env, &xlm).balance(&client.address);
+        let scout_balance_before = TokenClient::new(&env, &xlm).balance(&scout);
+
+        let refund_amount = 1_000_000i128;
+        client.refund_subscription(&scout, &refund_amount);
+
+        let contract_balance_after = TokenClient::new(&env, &xlm).balance(&client.address);
+        let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
+
+        assert_eq!(
+            contract_balance_before - refund_amount,
+            contract_balance_after
+        );
+        assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
+    }
+
+    #[test]
+    fn test_refund_subscription_zero_amount_rejected() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        let result = client.try_refund_subscription(&scout, &0i128);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_refund_subscription_negative_amount_rejected() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        let result = client.try_refund_subscription(&scout, &(-1i128));
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
     }
 }

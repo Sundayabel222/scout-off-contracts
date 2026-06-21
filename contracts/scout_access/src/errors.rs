@@ -32,4 +32,8 @@ pub enum ScoutAccessError {
     ProgressCallFailed = 14,
     /// A fee field is zero or negative, or sub_duration_secs is zero
     InvalidInput = 15,
+    /// No accumulated fees available to withdraw
+    NoFeesToWithdraw = 16,
+    /// Scout attempted to upgrade/renew before the minimum interval elapsed
+    UpgradeTooSoon = 17,
 }
