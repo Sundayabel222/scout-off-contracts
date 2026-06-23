@@ -8,7 +8,7 @@ use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
-use scoutchain_shared_types::ContractHealth;
+use scoutchain_shared_types::{validate_cid, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
 // In native/test builds the mock implementation below is used instead.
@@ -340,6 +340,8 @@ impl ScoutAccessContract {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
         scout.require_auth();
+
+        validate_cid(&details_hash).map_err(|_| ScoutAccessError::InvalidInput)?;
 
         let sub = Self::require_active_subscription(&env, &scout)?;
         if sub.tier != SubscriptionTier::Elite {
@@ -850,6 +852,63 @@ mod tests {
         let offer = client.get_trial_offer(&1u64, &1u32);
         assert_eq!(offer.player_id, 1);
         assert_eq!(offer.scout, scout);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #15)")]
+    fn test_log_trial_offer_rejects_empty_hash() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #15)")]
+    fn test_log_trial_offer_rejects_short_hash() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "Q"));
+    }
+
+    #[test]
+    fn test_log_trial_offer_accepts_cidv0() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let idx = client.log_trial_offer(
+            &scout,
+            &1u64,
+            &String::from_str(&env, "QmTrialDetails1234567890"),
+        );
+        assert_eq!(idx, 1);
+        assert_eq!(client.get_trial_count(&1u64), 1);
+    }
+
+    #[test]
+    fn test_log_trial_offer_accepts_cidv1() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let idx = client.log_trial_offer(
+            &scout,
+            &1u64,
+            &String::from_str(
+                &env,
+                "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+            ),
+        );
+        assert_eq!(idx, 1);
+        assert_eq!(client.get_trial_count(&1u64), 1);
     }
 
     #[test]

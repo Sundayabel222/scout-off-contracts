@@ -21,6 +21,8 @@ use types::{ContractHealth, DataKey, Milestone, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
+use scoutchain_shared_types::validate_cid;
+
 const MAX_CREDENTIALS_LEN: u32 = 256;
 
 // Generated client for the progress contract — used for cross-contract calls.
@@ -93,6 +95,7 @@ impl VerificationContract {
         env.storage()
             .instance()
             .set(&DataKey::ProgressContractSet, &true);
+        events::progress_contract_updated(&env, &progress_contract);
         Ok(())
     }
 
@@ -249,21 +252,7 @@ impl VerificationContract {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
 
-        // Validate evidence_hash: must start with "Qm" or "bafy", max 128 bytes
-        let hash_len = evidence_hash.len();
-        if !(2..=128).contains(&hash_len) {
-            return Err(VerificationError::InvalidInput);
-        }
-        let hash_bytes = evidence_hash.to_bytes();
-        let starts_with_qm = hash_bytes.get(0) == Some(b'Q') && hash_bytes.get(1) == Some(b'm');
-        let starts_with_bafy = hash_len >= 4
-            && hash_bytes.get(0) == Some(b'b')
-            && hash_bytes.get(1) == Some(b'a')
-            && hash_bytes.get(2) == Some(b'f')
-            && hash_bytes.get(3) == Some(b'y');
-        if !starts_with_qm && !starts_with_bafy {
-            return Err(VerificationError::InvalidInput);
-        }
+        validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
 
         // Verify the caller is an active validator
         let validator: Validator = env
@@ -761,6 +750,29 @@ mod tests {
     }
 
     #[test]
+    fn test_set_progress_contract_emits_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr = Address::generate(&env);
+        client.set_progress_contract(&addr);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "progress_contract_updated"),).into_val(&env),
+                    addr.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
     fn test_update_progress_contract_succeeds() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -769,7 +781,6 @@ mod tests {
         let addr1 = Address::generate(&env);
         let addr2 = Address::generate(&env);
         client.set_progress_contract(&addr1);
-        // update should succeed without error
         client.update_progress_contract(&addr2);
     }
 
