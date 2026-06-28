@@ -11,9 +11,11 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 use scoutchain_shared_types::{validate_cid, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
-// In native/test builds the mock implementation below is used instead.
+// The #[contractclient] macro generates a real Client that performs the
+// on-chain call — replacing the hand-written mock that was here before.
 mod progress_contract {
-    use soroban_sdk::{contracterror, Address, Env, Error as SorobanError, Val};
+    use scoutchain_shared_types::ProgressLevel;
+    use soroban_sdk::{contractclient, contracterror, Address, Env};
 
     #[contracterror]
     #[derive(Copy, Clone, Debug, PartialEq)]
@@ -22,39 +24,17 @@ mod progress_contract {
         AlreadyAtMaxLevel = 6,
     }
 
-    pub struct Client<'a> {
-        #[allow(dead_code)]
-        pub env: Env,
-        #[allow(dead_code)]
-        pub contract_id: Address,
-        #[allow(dead_code)]
-        phantom: core::marker::PhantomData<&'a ()>,
-    }
-
-    impl<'a> Client<'a> {
-        pub fn new(env: &Env, contract_id: &Address) -> Self {
-            Self {
-                env: env.clone(),
-                contract_id: contract_id.clone(),
-                phantom: core::marker::PhantomData,
-            }
-        }
-
-        pub fn try_advance_level(
-            &self,
-            _caller: &Address,
-            _player_id: &u64,
-            _milestone_ref: &u32,
-        ) -> Result<Result<Val, Val>, Result<Error, SorobanError>> {
-            Ok(Ok(0u32.into()))
-        }
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait ProgressContractClient {
+        fn advance_level(
+            env: Env,
+            caller: Address,
+            player_id: u64,
+            milestone_ref: u32,
+        ) -> Result<ProgressLevel, Error>;
     }
 }
-
-// Cross-contract client for the progress contract.
-// In native/test builds a mock implementation is used (see mod below).
-// For WASM deployment, the contractclient trait approach is used via the non-wasm mock
-// since contractimport! requires a pre-built wasm file not available at compile time.
 
 // Instance TTL bump
 const INSTANCE_TTL_MIN: u32 = 100;
@@ -1432,5 +1412,118 @@ mod tests {
         let scout = Address::generate(&env);
         let result = client.try_refund_subscription(&scout, &(-1i128));
         assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration test: log_trial_offer advances player to EliteTier via the
+    // real progress contract cross-contract call.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_log_trial_offer_advances_player_to_elite_tier() {
+        use scoutchain_progress::ProgressContract;
+        use scoutchain_progress::ProgressContractClient;
+        use scoutchain_shared_types::ProgressLevel;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // --- deploy progress contract ---
+        let progress_id = env.register_contract(None, ProgressContract);
+        let progress_client = ProgressContractClient::new(&env, &progress_id);
+        let progress_admin = Address::generate(&env);
+        progress_client.initialize(&progress_admin);
+
+        // --- deploy scout_access contract ---
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let scout_access_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &scout_access_id);
+        client.initialize(&admin, &xlm, &default_fees());
+
+        // Wire scout_access → progress
+        client.set_progress_contract(&progress_id);
+
+        // Pre-advance the player to PerformanceMilestones (Level 2) so that
+        // log_trial_offer can push them to EliteTier (Level 3).
+        let player_id = 1u64;
+        let caller = Address::generate(&env);
+        progress_client.advance_level(&caller, &player_id, &1u32); // → VerifiedIdentity
+        progress_client.advance_level(&caller, &player_id, &2u32); // → PerformanceMilestones
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::PerformanceMilestones
+        );
+
+        // Scout subscribes at Elite tier and logs a trial offer
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let idx = client.log_trial_offer(
+            &scout,
+            &player_id,
+            &String::from_str(&env, "QmTrialOfferIntegration"),
+        );
+        assert_eq!(idx, 1);
+
+        // Player must now be at EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
+    }
+
+    #[test]
+    fn test_log_trial_offer_already_at_max_level_does_not_fail() {
+        use scoutchain_progress::ProgressContract;
+        use scoutchain_progress::ProgressContractClient;
+        use scoutchain_shared_types::ProgressLevel;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // --- deploy progress contract ---
+        let progress_id = env.register_contract(None, ProgressContract);
+        let progress_client = ProgressContractClient::new(&env, &progress_id);
+        let progress_admin = Address::generate(&env);
+        progress_client.initialize(&progress_admin);
+
+        // --- deploy scout_access contract ---
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let scout_access_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &scout_access_id);
+        client.initialize(&admin, &xlm, &default_fees());
+
+        // Wire scout_access → progress
+        client.set_progress_contract(&progress_id);
+
+        // Pre-advance the player all the way to EliteTier
+        let player_id = 2u64;
+        let caller = Address::generate(&env);
+        progress_client.advance_level(&caller, &player_id, &1u32); // → VerifiedIdentity
+        progress_client.advance_level(&caller, &player_id, &2u32); // → PerformanceMilestones
+        progress_client.advance_level(&caller, &player_id, &3u32); // → EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
+
+        // log_trial_offer must still succeed even though AlreadyAtMaxLevel is returned
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let result = client.try_log_trial_offer(
+            &scout,
+            &player_id,
+            &String::from_str(&env, "QmAlreadyMaxLevel"),
+        );
+        assert!(result.is_ok(), "AlreadyAtMaxLevel must not fail the trial offer");
+
+        // Player stays at EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
     }
 }
