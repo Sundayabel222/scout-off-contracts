@@ -326,6 +326,77 @@ impl ScoutAccessContract {
         Ok(())
     }
 
+    /// Contact multiple players in a single transaction. Charges the contact fee
+    /// for each player that has not already been contacted. Already-contacted
+    /// players are silently skipped (no charge). The total fee for all new contacts
+    /// is deducted in a single token transfer. Returns the number of new contacts
+    /// that were recorded.
+    ///
+    /// Scout must have an active (non-expired) subscription.
+    pub fn batch_contact_players(
+        env: Env,
+        scout: Address,
+        player_ids: Vec<u64>,
+    ) -> Result<u32, ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        scout.require_auth();
+        Self::require_active_subscription(&env, &scout)?;
+
+        let config = Self::fee_config(&env);
+        let mut new_contacts: u32 = 0;
+
+        // First pass: count new (uncharged) contacts to compute total fee.
+        for i in 0..player_ids.len() {
+            let player_id = player_ids.get(i).unwrap();
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::ContactRecord(player_id, scout.clone()))
+            {
+                new_contacts = new_contacts
+                    .checked_add(1)
+                    .ok_or(ScoutAccessError::Overflow)?;
+            }
+        }
+
+        if new_contacts == 0 {
+            return Ok(0);
+        }
+
+        // Single token transfer for all new contacts combined.
+        let total_fee = config
+            .contact_fee_stroops
+            .checked_mul(new_contacts as i128)
+            .ok_or(ScoutAccessError::Overflow)?;
+        Self::collect_fee(&env, &scout, total_fee)?;
+
+        // Second pass: write contact records and emit events.
+        for i in 0..player_ids.len() {
+            let player_id = player_ids.get(i).unwrap();
+            let contact_key = DataKey::ContactRecord(player_id, scout.clone());
+            if env.storage().persistent().has(&contact_key) {
+                continue;
+            }
+            env.storage().persistent().set(&contact_key, &true);
+            env.storage().persistent().extend_ttl(
+                &contact_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+            events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
+        }
+
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        Ok(new_contacts)
+    }
+
     // -------------------------------------------------------------------------
     // Trial offer
     // -------------------------------------------------------------------------
