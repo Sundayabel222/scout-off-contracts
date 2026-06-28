@@ -967,7 +967,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
-        let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTrialDetails"));
+        let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
 
@@ -1008,7 +1008,7 @@ mod tests {
         let idx = client.log_trial_offer(
             &scout,
             &1u64,
-            &String::from_str(&env, "QmTrialDetails1234567890"),
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
         );
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
@@ -1047,7 +1047,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
         client.subscribe(&scout, &SubscriptionTier::Elite);
 
-        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTTLTest"));
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
 
         env.ledger().with_mut(|l| {
             l.sequence_number = 100_000 + 1_000;
@@ -1122,7 +1122,7 @@ mod tests {
         let (env, admin, xlm, _contract_id, client) = setup();
         let scout = Address::generate(&env);
         let player_id = 1u64;
-        let details_hash = String::from_str(&env, "QmTrialDetails");
+        let details_hash = String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB");
 
         let fees = default_fees();
 

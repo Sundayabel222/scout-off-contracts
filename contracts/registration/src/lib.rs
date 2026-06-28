@@ -11,6 +11,19 @@ use types::{
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
+// Generated client stub for the progress contract — used to resolve a player's
+// current level at read time.  `level` is never stored in this contract.
+mod progress_contract {
+    use scoutchain_shared_types::ProgressLevel;
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait ProgressContractClient {
+        fn get_level(env: Env, player_id: u64) -> ProgressLevel;
+    }
+}
+
 const MAX_REGION_LEN: u32 = 128;
 const MAX_STRING_LEN: u32 = 64;
 const MAX_IPFS_HASHES: u32 = 10;
@@ -52,7 +65,8 @@ impl RegistrationContract {
         Ok(())
     }
 
-    /// Store the progress contract address so it can call set_player_level (admin only).
+    /// Store the progress contract address so filter_players can resolve
+    /// levels at query time (admin only).
     pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
         Self::require_admin(&env)?;
         env.storage()
@@ -132,12 +146,11 @@ impl RegistrationContract {
         let player_id = Self::next_player_id(&env)?;
         let now = env.ledger().timestamp();
 
-        let profile = PlayerProfile {
+        let profile = StoredPlayerProfile {
             player_id,
             wallet: wallet.clone(),
             vitals,
             ipfs_hashes,
-            level: ProgressLevel::Unverified,
             registered_at: now,
             updated_at: now,
         };
@@ -174,7 +187,7 @@ impl RegistrationContract {
         ipfs_hashes: Vec<String>,
     ) -> Result<(), ScoutChainError> {
         Self::require_not_paused(&env)?;
-        let mut profile = Self::load_player(&env, player_id)?;
+        let mut profile = Self::load_stored_player(&env, player_id)?;
         profile.wallet.require_auth();
         if ipfs_hashes.is_empty() || ipfs_hashes.len() > MAX_IPFS_HASHES {
             return Err(ScoutChainError::InvalidInput);
@@ -191,7 +204,7 @@ impl RegistrationContract {
     /// Deregister a player profile (admin only, GDPR right-to-erasure).
     pub fn deregister_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
         Self::require_admin(&env)?;
-        let profile = Self::load_player(&env, player_id)?;
+        let profile = Self::load_stored_player(&env, player_id)?;
         env.storage()
             .persistent()
             .remove(&DataKey::Player(player_id));
@@ -388,7 +401,9 @@ impl RegistrationContract {
         region: String,
         position: String,
         min_level: ProgressLevel,
-    ) -> Result<Vec<PlayerProfile>, ScoutChainError> {
+        cursor: u64,
+        limit: u32,
+    ) -> Result<FilterResult, ScoutChainError> {
         Self::require_initialized(&env)?;
 
         // Collect candidate player IDs from composite index buckets.
@@ -400,8 +415,9 @@ impl RegistrationContract {
             ProgressLevel::EliteTier,
         ];
 
-        let mut results = Vec::new(&env);
-        let max_results = 50u32;
+        let mut profiles = Vec::new(&env);
+        let mut next_cursor: u64 = 0;
+        let mut past_cursor = cursor == 0; // cursor=0 means start from beginning
 
         for level in levels.iter() {
             if !Self::level_gte(level, &min_level) {
@@ -429,7 +445,10 @@ impl RegistrationContract {
             }
         }
 
-        Ok(results)
+        Ok(FilterResult {
+            profiles,
+            next_cursor,
+        })
     }
 
     /// Returns the deployed crate version (from Cargo.toml at build time).
@@ -475,11 +494,45 @@ impl RegistrationContract {
         Ok(())
     }
 
-    fn load_player(env: &Env, player_id: u64) -> Result<PlayerProfile, ScoutChainError> {
+    fn load_stored_player(env: &Env, player_id: u64) -> Result<StoredPlayerProfile, ScoutChainError> {
         env.storage()
             .persistent()
             .get(&DataKey::Player(player_id))
             .ok_or(ScoutChainError::PlayerNotFound)
+    }
+
+    /// Resolve the current level for `player_id` from the progress contract.
+    /// Falls back to `Unverified` when no progress contract is configured
+    /// (e.g. during tests or before deployment wiring).
+    fn resolve_level(env: &Env, player_id: u64) -> ProgressLevel {
+        if let Some(progress_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::ProgressContract)
+        {
+            let client = progress_contract::Client::new(env, &progress_addr);
+            client.get_level(&player_id)
+        } else {
+            ProgressLevel::Unverified
+        }
+    }
+
+    fn stored_to_profile(stored: StoredPlayerProfile, level: ProgressLevel) -> PlayerProfile {
+        PlayerProfile {
+            player_id: stored.player_id,
+            wallet: stored.wallet,
+            vitals: stored.vitals,
+            ipfs_hashes: stored.ipfs_hashes,
+            level,
+            registered_at: stored.registered_at,
+            updated_at: stored.updated_at,
+        }
+    }
+
+    fn load_player(env: &Env, player_id: u64) -> Result<PlayerProfile, ScoutChainError> {
+        let stored = Self::load_stored_player(env, player_id)?;
+        let level = Self::resolve_level(env, player_id);
+        Ok(Self::stored_to_profile(stored, level))
     }
 
     fn to_player_summary(profile: &PlayerProfile) -> PlayerSummary {
@@ -977,7 +1030,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Issue #31: filter_players query function
+    // Issue #31: filter_players query function (now paginated — #223)
     // -------------------------------------------------------------------------
 
     #[test]
@@ -1018,15 +1071,83 @@ mod tests {
         };
         client.register_player(&wallet3, &vitals3, &hashes);
 
-        // Filter: Forward in West Africa
-        let results = client.filter_players(
+        // Filter: Forward in West Africa — page 1
+        let result = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
+            &0u64,
+            &20u32,
         );
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results.get(0).unwrap().player_id, 1);
+        assert_eq!(result.profiles.len(), 1);
+        assert_eq!(result.profiles.get(0).unwrap().player_id, 1);
+        assert_eq!(result.next_cursor, 0); // no more pages
+    }
+
+    #[test]
+    fn test_filter_players_pagination() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Register 5 Forwards in West Africa
+        for _ in 0..5 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 18,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+        // Register 1 Midfielder to break up the list
+        let wallet_mid = Address::generate(&env);
+        let vitals_mid = PlayerVitals {
+            age: 22,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        client.register_player(&wallet_mid, &vitals_mid, &hashes);
+        // Register 3 more Forwards
+        for _ in 0..3 {
+            let wallet = Address::generate(&env);
+            let vitals = PlayerVitals {
+                age: 19,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            };
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+
+        // Page 1: limit=4 → should return 4 Forwards and a next_cursor
+        let page1 = client.filter_players(
+            &String::from_str(&env, "West Africa"),
+            &String::from_str(&env, "Forward"),
+            &ProgressLevel::Unverified,
+            &0u64,
+            &4u32,
+        );
+        assert_eq!(page1.profiles.len(), 4);
+        assert_ne!(page1.next_cursor, 0, "expected more pages");
+
+        // Page 2: continue from next_cursor
+        let page2 = client.filter_players(
+            &String::from_str(&env, "West Africa"),
+            &String::from_str(&env, "Forward"),
+            &ProgressLevel::Unverified,
+            &page1.next_cursor,
+            &4u32,
+        );
+        // 5 Forwards total, already fetched 4, so 4 more candidates remain
+        // (player 5 + skip midfielder + players 7,8,9) → 4 matches
+        assert_eq!(page2.profiles.len(), 4);
+        assert_eq!(page2.next_cursor, 0, "should be no more pages");
     }
 
     // -------------------------------------------------------------------------
