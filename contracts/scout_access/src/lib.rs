@@ -1690,6 +1690,76 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    // -------------------------------------------------------------------------
+    // Fee accumulation tests across multiple subscriptions
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_accumulated_fees_sum_across_multiple_scout_subscriptions() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+
+        // Create three scouts and mint tokens for each
+        let scout_basic = Address::generate(&env);
+        let scout_pro = Address::generate(&env);
+        let scout_elite = Address::generate(&env);
+
+        let fees = default_fees();
+        
+        mint_token(&env, &xlm, &admin, &scout_basic, 10_000_000);
+        mint_token(&env, &xlm, &admin, &scout_pro, 10_000_000);
+        mint_token(&env, &xlm, &admin, &scout_elite, 20_000_000);
+
+        // Subscribe each scout to a different tier
+        client.subscribe(&scout_basic, &SubscriptionTier::Basic);
+        client.subscribe(&scout_pro, &SubscriptionTier::Pro);
+        client.subscribe(&scout_elite, &SubscriptionTier::Elite);
+
+        // Verify accumulated fees equals sum of all three subscription fees
+        let expected_total = fees.basic_sub_stroops + fees.pro_sub_stroops + fees.elite_sub_stroops;
+        assert_eq!(client.get_accumulated_fees(), expected_total);
+
+        // Withdraw fees and verify the amount
+        let recipient = Address::generate(&env);
+        let withdrawn = client.withdraw_fees(&recipient);
+        assert_eq!(withdrawn, expected_total);
+
+        // Verify accumulated fees reset to 0
+        assert_eq!(client.get_accumulated_fees(), 0);
+
+        // Verify token balances are consistent
+        let token_client = TokenClient::new(&env, &xlm);
+        assert_eq!(token_client.balance(&recipient), expected_total);
+    }
+
+    // -------------------------------------------------------------------------
+    // pause_contract event tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_pause_contract_emits_contract_paused_event() {
+        let (env, admin, xlm, contract_id, client) = setup();
+
+        // Pause the contract
+        client.pause_contract();
+
+        // Verify the contract_paused event is emitted with correct topic and admin payload
+        let events = env.events().all();
+        assert_eq!(
+            events.filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "contract_paused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+
+        // Verify contract is actually paused
+        assert!(client.health().paused);
+    }
+
     fn test_refund_subscription_success() {
         let (env, admin, xlm, _contract_id, client) = setup();
         let scout = Address::generate(&env);
