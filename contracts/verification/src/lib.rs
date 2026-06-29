@@ -1108,4 +1108,52 @@ mod tests {
             &String::from_str(&env, "zdj7WbTaiJT1fgatdet7Sjxf4PJQgXkGfXPFgq5a2SdxYqYg"),
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Bug condition exploration test: TTL expiry without bump (Task 1)
+    // -------------------------------------------------------------------------
+
+    /// Bug condition exploration test: proves that `get_milestone` does NOT extend
+    /// the persistent TTL of `DataKey::Milestone(player_id, index)`.
+    ///
+    /// Steps:
+    ///   1. Initialize contract and register a validator (admin approves a scout as validator)
+    ///   2. Call `approve_milestone` to store `DataKey::Milestone(player_id, 1)`
+    ///   3. Advance `env.ledger().sequence_number` past the default Soroban persistent TTL
+    ///      threshold (100_000 — far above the ~4096 default persistent TTL)
+    ///   4. Call `get_milestone(player_id, 1)` and assert it returns the `Milestone` struct
+    ///
+    /// EXPECTED OUTCOME on UNFIXED code: TEST FAILS — the milestone key has expired,
+    /// so `get_milestone` panics or returns `MilestoneNotFound` instead of the `Milestone`.
+    /// This failure confirms the bug: reads never extend the TTL.
+    #[test]
+    fn test_get_milestone_ttl_expires_without_bump() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let player_id: u64 = 1u64;
+        client.approve_milestone(
+            &validator,
+            &player_id,
+            &String::from_str(&env, "Identity verified"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+
+        // Advance the ledger sequence far past the default Soroban persistent TTL (~4096).
+        // After this point, any persistent key written before the advance (without an
+        // explicit extend_ttl) will have expired and become inaccessible.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000; // well past the ~4096 default persistent TTL
+            l.max_entry_ttl = 100_000;
+        });
+
+        // On unfixed code this panics because `DataKey::Milestone(player_id, 1)` has expired.
+        // The test asserts a successful return — it WILL FAIL on unfixed code, proving the bug.
+        let milestone = client.get_milestone(&player_id, &1u32);
+        assert_eq!(milestone.player_id, player_id);
+    }
 }
