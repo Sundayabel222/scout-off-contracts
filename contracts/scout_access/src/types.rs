@@ -22,6 +22,16 @@ pub struct Subscription {
     pub subscribed_at: u64,
 }
 
+/// A recorded contact event from a scout to a player
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContactRecord {
+    pub player_id: u64,
+    pub scout: Address,
+    /// Ledger timestamp at the moment the contact was recorded
+    pub contacted_at: u64,
+}
+
 /// A logged trial offer from a scout to a player
 #[contracttype]
 #[derive(Clone, Debug)]

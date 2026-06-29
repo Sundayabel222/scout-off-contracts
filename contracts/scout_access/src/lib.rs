@@ -3,7 +3,7 @@ mod events;
 mod types;
 
 use errors::ScoutAccessError;
-use types::{DataKey, Subscription, TrialOffer};
+use types::{ContactRecord, DataKey, Subscription, TrialOffer};
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
@@ -309,7 +309,12 @@ impl ScoutAccessContract {
         let config = Self::fee_config(&env);
         Self::collect_fee(&env, &scout, config.contact_fee_stroops)?;
 
-        env.storage().persistent().set(&contact_key, &true);
+        let record = ContactRecord {
+            player_id,
+            scout: scout.clone(),
+            contacted_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&contact_key, &record);
         env.storage()
             .persistent()
             .extend_ttl(&contact_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
@@ -391,7 +396,12 @@ impl ScoutAccessContract {
             if env.storage().persistent().has(&contact_key) {
                 continue;
             }
-            env.storage().persistent().set(&contact_key, &true);
+            let record = ContactRecord {
+                player_id,
+                scout: scout.clone(),
+                contacted_at: env.ledger().timestamp(),
+            };
+            env.storage().persistent().set(&contact_key, &record);
             env.storage().persistent().extend_ttl(
                 &contact_key,
                 PERSISTENT_TTL_MIN,
@@ -551,13 +561,31 @@ impl ScoutAccessContract {
     pub fn has_contacted(env: Env, scout: Address, player_id: u64) -> bool {
         Self::bump_instance_ttl(&env);
         let key = DataKey::ContactRecord(player_id, scout);
-        let exists = env.storage().persistent().has(&key);
-        if exists {
+        let record: Option<ContactRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         }
-        exists
+        record.is_some()
+    }
+
+    /// Retrieve the full ContactRecord for a (player_id, scout) pair.
+    /// Returns None if the scout has not contacted this player.
+    pub fn get_contact_record(
+        env: Env,
+        scout: Address,
+        player_id: u64,
+    ) -> Option<ContactRecord> {
+        Self::bump_instance_ttl(&env);
+        let key = DataKey::ContactRecord(player_id, scout);
+        let record: Option<ContactRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        record
     }
 
     /// Return all player_ids contacted by `scout` as an O(1) index lookup.
@@ -1003,6 +1031,51 @@ mod tests {
         assert!(client.has_contacted(&scout, &1u64));
         // elite fee + contact fee
         assert_eq!(client.get_accumulated_fees(), 7_000_000 + 100_000);
+    }
+
+    /// Issue #422 — contact_player stores a ContactRecord but no test reads back
+    /// all fields and asserts correctness. This test calls pay_to_contact, then
+    /// retrieves the stored ContactRecord via get_contact_record and asserts that
+    /// player_id, scout address, and contacted_at all match the expected values.
+    #[test]
+    fn test_contact_record_fields_stored_correctly() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        let player_id: u64 = 77;
+
+        // Pin the ledger timestamp so we can assert contacted_at precisely.
+        env.ledger().with_mut(|l| l.timestamp = 1_500_000);
+
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Advance time slightly so the contact timestamp is distinct from
+        // the subscription timestamp, making the assertion unambiguous.
+        env.ledger().with_mut(|l| l.timestamp = 1_500_100);
+        let contact_time = env.ledger().timestamp();
+
+        client.pay_to_contact(&scout, &player_id);
+
+        // Retrieve and unwrap the stored record.
+        let record = client
+            .get_contact_record(&scout, &player_id)
+            .expect("ContactRecord should exist after pay_to_contact");
+
+        // All three fields must match exactly.
+        assert_eq!(record.player_id, player_id, "player_id mismatch");
+        assert_eq!(record.scout, scout, "scout address mismatch");
+        assert!(
+            record.contacted_at >= contact_time,
+            "contacted_at ({}) should be >= ledger timestamp at call time ({})",
+            record.contacted_at,
+            contact_time,
+        );
+
+        // has_contacted must still return true (regression guard).
+        assert!(client.has_contacted(&scout, &player_id));
+
+        // get_contact_record for an unknown pair must return None.
+        assert!(client.get_contact_record(&scout, &999u64).is_none());
     }
 
     #[test]
