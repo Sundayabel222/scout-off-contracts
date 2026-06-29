@@ -1557,4 +1557,95 @@ fn test_upgrade_preserves_admin() {
         assert_eq!(profile.wallet, wallet);
         assert_eq!(profile.level, ProgressLevel::Unverified);
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #413: set_player_level is rejected when called by a non-progress-
+    //             contract address
+    // -------------------------------------------------------------------------
+
+    /// Verifies that set_player_level is protected by the progress-contract
+    /// authorization guard:
+    ///
+    /// 1. A progress contract address is registered via set_progress_contract.
+    /// 2. A call to set_player_level with no auth provided for the registered
+    ///    address is rejected (auth error).
+    /// 3. The player's level in storage remains Unverified after the rejected call.
+    /// 4. A call with auth provided for the registered progress contract address
+    ///    succeeds and updates the level.
+    #[test]
+    fn test_set_player_level_rejected_for_non_progress_contract_caller() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(RegistrationContract, ());
+        let client = RegistrationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register a player so there is something to update.
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // Set a specific progress contract address.
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        // ------------------------------------------------------------------ //
+        // Step 2: attempt set_player_level with a DIFFERENT random address
+        // authorised — the stored progress_addr.require_auth() check must fail.
+        // ------------------------------------------------------------------ //
+        let unrelated_addr = Address::generate(&env);
+
+        // Use mock_auths to provide auth only for unrelated_addr, NOT for
+        // progress_addr. This means progress_addr.require_auth() will fail.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &unrelated_addr,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_player_level",
+                args: (player_id, ProgressLevel::VerifiedIdentity).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
+        assert!(
+            result.is_err(),
+            "set_player_level must be rejected when called by a non-progress-contract address"
+        );
+
+        // Step 3: player level must remain Unverified after the rejected call.
+        // (level is resolved from the progress contract or defaults to Unverified
+        //  when no progress contract is wired for level resolution)
+        let profile_after_rejection = client.get_player(&player_id);
+        assert_eq!(
+            profile_after_rejection.level,
+            ProgressLevel::Unverified,
+            "player level must remain Unverified after rejected call"
+        );
+
+        // ------------------------------------------------------------------ //
+        // Step 4: authorised call from the registered progress contract address
+        // must succeed and update the level.
+        // ------------------------------------------------------------------ //
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &progress_addr,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_player_level",
+                args: (player_id, ProgressLevel::VerifiedIdentity).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let authorized_result =
+            client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
+        assert!(
+            authorized_result.is_ok(),
+            "set_player_level must succeed when called by the registered progress contract"
+        );
+    }
 }
