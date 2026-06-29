@@ -218,6 +218,23 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
+
+        let mut validator_vector: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_vector: Vec<Address> = Vec::new(&env);
+        for i in 0..validator_vector.len() {
+            let addr = validator_vector.get(i).unwrap();
+            if addr != wallet {
+                new_vector.push_back(addr);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorVector, &new_vector);
+
         events::validator_revoked(&env, &wallet, &reason.unwrap_or(String::from_str(&env, "")));
         Ok(())
     }
@@ -988,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_validators_includes_revoked() {
+    fn test_get_validators_excludes_revoked() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -1005,9 +1022,9 @@ mod tests {
         client.revoke_validator(&v2, &reason);
 
         let validators = client.get_validators();
-        assert_eq!(validators.len(), 3);
+        assert_eq!(validators.len(), 2);
         assert!(validators.contains(&v1));
-        assert!(validators.contains(&v2));
+        assert!(!validators.contains(&v2));
         assert!(validators.contains(&v3));
     }
 
