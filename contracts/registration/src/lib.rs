@@ -6,7 +6,7 @@ mod types;
 use errors::ScoutChainError;
 use types::{
     ContractHealth, DataKey, FilterResult, PlayerProfile, PlayerSummary, PlayerVitals,
-    ProgressLevel, ScoutProfile, StoredPlayerProfile,
+    ProgressLevel, ScoutProfile,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
@@ -105,9 +105,11 @@ impl RegistrationContract {
         let old_level = profile.level.clone();
         let region = profile.vitals.region.clone();
 
-        // Update composite index: remove from old bucket, add to new bucket
+        // Update composite and per-level indexes: remove from old bucket, add to new
         Self::composite_index_remove(&env, &old_level, &region, player_id);
         Self::composite_index_add(&env, &level, &region, player_id);
+        Self::level_index_remove(&env, &old_level, player_id);
+        Self::level_index_add(&env, &level, player_id);
 
         profile.level = level;
         profile.updated_at = env.ledger().timestamp();
@@ -188,6 +190,7 @@ impl RegistrationContract {
 
         // Add to composite (level, region) index — starts at Unverified
         Self::composite_index_add(&env, &ProgressLevel::Unverified, &profile.vitals.region, player_id);
+        Self::level_index_add(&env, &ProgressLevel::Unverified, player_id);
 
         events::player_registered(&env, player_id, &wallet);
         Ok(player_id)
@@ -425,7 +428,7 @@ impl RegistrationContract {
         region: String,
         position: String,
         min_level: ProgressLevel,
-        cursor: u64,
+        offset: u32,
         limit: u32,
     ) -> Result<FilterResult, ScoutChainError> {
         Self::require_initialized(&env)?;
@@ -678,6 +681,30 @@ impl RegistrationContract {
     /// Remove `player_id` from the composite (level, region) index bucket.
     fn composite_index_remove(env: &Env, level: &ProgressLevel, region: &String, player_id: u64) {
         let key = DataKey::PlayersByLevelRegion(level.clone(), region.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if let Some(pos) = ids.iter().position(|id| id == player_id) {
+            ids.remove(pos as u32);
+            env.storage().persistent().set(&key, &ids);
+        }
+    }
+
+    fn level_index_add(env: &Env, level: &ProgressLevel, player_id: u64) {
+        let key = DataKey::PlayersByLevel(level.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        ids.push_back(player_id);
+        env.storage().persistent().set(&key, &ids);
+    }
+
+    fn level_index_remove(env: &Env, level: &ProgressLevel, player_id: u64) {
+        let key = DataKey::PlayersByLevel(level.clone());
         let mut ids: Vec<u64> = env
             .storage()
             .persistent()
@@ -1238,12 +1265,12 @@ mod tests {
         };
         client.register_player(&wallet3, &vitals3, &hashes);
 
-        // Filter: Forward in West Africa — page 1
+        // Filter: Forward in West Africa — offset=0
         let result = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
-            &0u64,
+            &0u32,
             &20u32,
         );
 
@@ -1292,28 +1319,27 @@ mod tests {
             client.register_player(&wallet, &vitals, &hashes);
         }
 
-        // Page 1: limit=4 → should return 4 Forwards and a next_cursor
+        // Page 1: offset=0, limit=4 → should return 4 Forwards
         let page1 = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
-            &0u64,
+            &0u32,
             &4u32,
         );
         assert_eq!(page1.profiles.len(), 4);
         assert_ne!(page1.next_cursor, 0, "expected more pages");
 
-        // Page 2: continue from next_cursor
+        // Page 2: offset=4, limit=4 → remaining Forwards
         let page2 = client.filter_players(
             &String::from_str(&env, "West Africa"),
             &String::from_str(&env, "Forward"),
             &ProgressLevel::Unverified,
-            &page1.next_cursor,
+            &4u32,
             &4u32,
         );
-        // Page2 starts after cursor=player_5 (exclusive cursor semantics).
-        // Remaining: player 6 (Midfielder, skipped), players 7,8,9 → 3 matches.
-        assert_eq!(page2.profiles.len(), 3);
+        // 8 Forwards total, already skipped 4, so 4 more remain
+        assert_eq!(page2.profiles.len(), 4);
         assert_eq!(page2.next_cursor, 0, "should be no more pages");
     }
 
