@@ -14,8 +14,25 @@ const INSTANCE_TTL_MAX: u32 = 500;
 
 const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 2000;
+const ADMIN_BUMP_LEDGERS: u32 = 1000;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+mod registration_contract {
+    use soroban_sdk::{contractclient, contracterror, Address, Env};
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        Unauthorized = 10,
+    }
+
+    #[contractclient(name = "Client")]
+    pub trait RegistrationContractClient {
+        fn set_player_level(env: Env, player_id: u64, level: super::ProgressLevel) -> Result<(), Error>;
+    }
+}
 
 #[contract]
 pub struct ProgressContract;
@@ -27,25 +44,15 @@ impl ProgressContract {
     // -------------------------------------------------------------------------
 
     pub fn initialize(env: Env, admin: Address) -> Result<(), ProgressError> {
-        Self::bump_instance_ttl(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ProgressError::AlreadyInitialized);
         }
         admin.require_auth();
+        Self::bump_instance_ttl(&env);
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
-        Ok(())
-    }
-
-    /// Store the verification contract address allowed to call `advance_level`.
-    /// When set, only that contract may authorize level advances (admin only).
-    pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
         Ok(())
     }
 
@@ -121,6 +128,9 @@ impl ProgressContract {
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ProgressError> {
         Self::require_admin(&env)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
     /// Reset a player's level for dispute resolution.
     /// Existing history is preserved; a new history entry records the reset.
     pub fn reset_player_level(
@@ -454,7 +464,6 @@ impl ProgressContract {
             .ok_or(ProgressError::NotInitialized)?;
         admin.require_auth();
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
-        Ok(())
         Ok(admin)
     }
 }
@@ -466,7 +475,7 @@ impl ProgressContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events as _},
+        testutils::{storage::Instance, Address as _, Events as _},
         vec, Env, IntoVal, Symbol,
     };
 
@@ -651,11 +660,7 @@ mod tests {
 
     #[test]
     fn test_get_progress_history_page() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let validator = Address::generate(&env);
+        let (env, client, validator) = setup();
         let player_id = 20u64;
 
         // Advance through all 3 tiers
@@ -791,8 +796,6 @@ mod tests {
         client.pause_contract();
     }
 
-    #[test]
-    fn test_upgrade_preserves_admin() {
     fn test_reset_player_level_success() {
         let (env, client, validator) = setup();
         let player_id = 1u64;
@@ -881,5 +884,25 @@ mod tests {
 
         let result = client.try_advance_level(&validator, &player_id, &4u32);
         assert_eq!(result, Err(Ok(ProgressError::AlreadyAtMaxLevel)));
+    }
+
+    #[test]
+    fn test_double_initialize_does_not_extend_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+
+        client.initialize(&admin);
+
+        let ttl_before = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        let result = client.try_initialize(&admin);
+        assert_eq!(result, Err(Ok(ProgressError::AlreadyInitialized)));
+
+        let ttl_after = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        assert_eq!(ttl_before, ttl_after);
     }
 }

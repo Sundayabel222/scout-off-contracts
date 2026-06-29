@@ -1,4 +1,5 @@
-#![cfg_attr(target_family = "wasm", no_std)]mod errors;
+#![cfg_attr(target_family = "wasm", no_std)]
+mod errors;
 mod events;
 mod types;
 
@@ -43,6 +44,7 @@ const INSTANCE_TTL_MAX: u32 = 500;
 // Persistent storage TTL bump for subscriptions / contact records.
 const PERSISTENT_TTL_MIN: u32 = 200;
 const PERSISTENT_TTL_MAX: u32 = 2_000;
+const ADMIN_BUMP_LEDGERS: u32 = 1000;
 
 // Trial offer TTL: ~30 days at 5 s/ledger.
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
@@ -75,12 +77,12 @@ impl ScoutAccessContract {
         xlm_token: Address,
         fee_config: FeeConfig,
     ) -> Result<(), ScoutAccessError> {
-        Self::bump_instance_ttl(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ScoutAccessError::AlreadyInitialized);
         }
-        Self::validate_fee_config(&fee_config)?;
         admin.require_auth();
+        Self::validate_fee_config(&fee_config)?;
+        Self::bump_instance_ttl(&env);
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
@@ -758,7 +760,7 @@ impl ScoutAccessContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
+        testutils::{storage::Instance, Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
         token::{Client as TokenClient, StellarAssetClient},
         Env, IntoVal, String, Symbol,
     };
@@ -1558,18 +1560,13 @@ mod tests {
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
         assert_eq!(
-    contract_balance_before - refund_amount,
-    contract_balance_after
-);
-
-assert_eq!(
-    scout_balance_before + refund_amount,
-    scout_balance_after
-);
             contract_balance_before - refund_amount,
             contract_balance_after
         );
-        assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
+        assert_eq!(
+            scout_balance_before + refund_amount,
+            scout_balance_after
+        );
     }
 
     #[test]
@@ -1699,5 +1696,26 @@ assert_eq!(
             progress_client.get_level(&player_id),
             ProgressLevel::EliteTier
         );
+    }
+
+    #[test]
+    fn test_double_initialize_does_not_extend_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &id);
+
+        client.initialize(&admin, &xlm, &default_fees());
+
+        let ttl_before = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        let result = client.try_initialize(&admin, &xlm, &default_fees());
+        assert_eq!(result, Err(Ok(ScoutAccessError::AlreadyInitialized)));
+
+        let ttl_after = env.as_contract(&id, || env.storage().instance().get_ttl());
+
+        assert_eq!(ttl_before, ttl_after);
     }
 }
