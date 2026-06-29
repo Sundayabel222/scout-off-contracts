@@ -161,6 +161,7 @@ impl ScoutAccessContract {
         env.storage()
             .instance()
             .set(&DataKey::ProgressContract, &addr);
+        events::progress_contract_updated(&env, &addr);
         Ok(())
     }
 
@@ -180,6 +181,10 @@ impl ScoutAccessContract {
         }
         let xlm = Self::get_token(&env);
         let contract_addr = env.current_contract_address();
+        let balance = token::Client::new(&env, &xlm).balance(&contract_addr);
+        if amount > balance {
+            return Err(ScoutAccessError::InsufficientFee);
+        }
         token::Client::new(&env, &xlm).transfer(&contract_addr, &scout, &amount);
         events::subscription_refunded(&env, &scout, amount);
         Ok(())
@@ -1586,6 +1591,53 @@ assert_eq!(
         let scout = Address::generate(&env);
         let result = client.try_refund_subscription(&scout, &(-1i128));
         assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_refund_subscription_exceeds_balance_returns_insufficient_fee() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 1_000_000);
+        // Scout subscribes Basic (1_000_000 stroops) — contract now holds 1_000_000
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        // Attempt to refund more than the contract balance
+        let result = client.try_refund_subscription(&scout, &2_000_000i128);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InsufficientFee)));
+    }
+
+    #[test]
+    fn test_refund_subscription_within_balance_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        // Refund exactly what was paid — within balance
+        let result = client.try_refund_subscription(&scout, &1_000_000i128);
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // #451: set_progress_contract emits progress_contract_updated event
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_set_progress_contract_emits_event() {
+        let (env, _admin, _xlm, contract_id, client) = setup();
+        let progress_addr = Address::generate(&env);
+
+        client.set_progress_contract(&progress_addr);
+
+        assert_eq!(
+            env.events().all().filter_by_contract(&contract_id),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "progress_contract_updated"),).into_val(&env),
+                    progress_addr.clone().into_val(&env),
+                )
+            ]
+        );
     }
 
     // -------------------------------------------------------------------------

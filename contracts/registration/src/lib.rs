@@ -206,6 +206,8 @@ impl RegistrationContract {
     pub fn deregister_player(env: Env, player_id: u64) -> Result<(), ScoutChainError> {
         Self::require_admin(&env)?;
         let profile = Self::load_stored_player(&env, player_id)?;
+        // Resolve level before removing storage keys (progress contract is source of truth)
+        let level = Self::resolve_level(&env, player_id);
         env.storage()
             .persistent()
             .remove(&DataKey::Player(player_id));
@@ -227,7 +229,7 @@ impl RegistrationContract {
         }
 
         // Remove from composite index
-        Self::composite_index_remove(&env, &profile.level, &profile.vitals.region, player_id);
+        Self::composite_index_remove(&env, &level, &profile.vitals.region, player_id);
 
         events::player_deregistered(&env, player_id);
         Ok(())

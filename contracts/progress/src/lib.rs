@@ -405,6 +405,11 @@ impl ProgressContract {
             .persistent()
             .set(&DataKey::HistoryEntry(player_id, next_index), &entry);
         env.storage().persistent().set(&history_key, &next_index);
+        env.storage().persistent().extend_ttl(
+            &history_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Also append to the single-key Vec so get_progress_history costs O(1) reads.
         let vec_key = DataKey::HistoryVec(player_id);
