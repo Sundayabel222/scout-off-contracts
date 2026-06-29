@@ -1,4 +1,5 @@
-#![cfg_attr(target_family = "wasm", no_std)]mod errors;
+#![cfg_attr(target_family = "wasm", no_std)]
+mod errors;
 mod events;
 mod types;
 
@@ -6,7 +7,7 @@ use errors::ScoutAccessError;
 use types::{DataKey, Subscription, TrialOffer};
 pub use types::{FeeConfig, SubscriptionTier};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 use scoutchain_shared_types::{validate_cid, ContractHealth};
 
@@ -51,6 +52,11 @@ const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 const TRIAL_TTL_THRESHOLD: u32 = 259_200;
 const TRIAL_TTL_EXTEND_TO: u32 = 518_400;
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Minimum fee values to prevent trivial fees (e.g. 1 stroop) that would
+// render the monetization model ineffective.
+const MIN_CONTACT_FEE_STROOPS: i128 = 1_000;
+const MIN_SUB_FEE_STROOPS: i128 = 100_000;
 
 // Minimum interval (seconds) between subscribe calls for the same scout
 // to prevent race conditions / double-charging on rapid upgrades.
@@ -432,6 +438,15 @@ impl ScoutAccessContract {
 
         validate_cid(&details_hash).map_err(|_| ScoutAccessError::InvalidInput)?;
 
+        // Scout must have contacted the player before sending a trial offer.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::ContactRecord(player_id, scout.clone()))
+        {
+            return Err(ScoutAccessError::PlayerNotContacted);
+        }
+
         let sub = Self::require_active_subscription(&env, &scout)?;
         if sub.tier != SubscriptionTier::Elite {
             return Err(ScoutAccessError::Unauthorized);
@@ -794,12 +809,13 @@ impl ScoutAccessContract {
         Self::accumulate_fee(env, amount)
     }
 
-    /// Validate that every fee field is positive and sub_duration_secs is non-zero.
+    /// Validate that every fee field is above the minimum threshold
+    /// and sub_duration_secs is non-zero.
     fn validate_fee_config(config: &FeeConfig) -> Result<(), ScoutAccessError> {
-        if config.contact_fee_stroops <= 0
-            || config.basic_sub_stroops <= 0
-            || config.pro_sub_stroops <= 0
-            || config.elite_sub_stroops <= 0
+        if config.contact_fee_stroops < MIN_CONTACT_FEE_STROOPS
+            || config.basic_sub_stroops < MIN_SUB_FEE_STROOPS
+            || config.pro_sub_stroops < MIN_SUB_FEE_STROOPS
+            || config.elite_sub_stroops < MIN_SUB_FEE_STROOPS
             || config.sub_duration_secs == 0
         {
             return Err(ScoutAccessError::InvalidInput);
@@ -1622,14 +1638,6 @@ mod tests {
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
         assert_eq!(
-    contract_balance_before - refund_amount,
-    contract_balance_after
-);
-
-assert_eq!(
-    scout_balance_before + refund_amount,
-    scout_balance_after
-);
             contract_balance_before - refund_amount,
             contract_balance_after
         );

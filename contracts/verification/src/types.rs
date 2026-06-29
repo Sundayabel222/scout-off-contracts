@@ -12,7 +12,7 @@ pub enum ValidatorStatus {
 
 /// A single verified milestone record
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
     pub player_id: u64,
     pub validator: Address,
@@ -46,8 +46,7 @@ pub enum DataKey {
     MilestoneCounter(u64),
     Milestone(u64, u32),
     ValidatorMilestoneCount(Address),
-    /// progress contract address (cross-contract calls)
-    ProgressContract,
+    ValidatorPlayerMilestoneCount(Address, u64),
     ValidatorVector,
     TotalMilestoneCount,
 }

@@ -42,13 +42,7 @@ const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 // Maximum milestones one validator may approve for a single player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
-// Generated client for the progress contract — used for cross-contract calls.
-// The progress contract must be deployed and its address registered via
-// `set_progress_contract` before `approve_milestone` can advance levels.
 mod progress_contract {
-    soroban_sdk::contractimport!(
-        file = "fixtures/scoutchain_progress.wasm"
-    );
     use scoutchain_shared_types::ProgressLevel;
     use soroban_sdk::{contractclient, contracterror, Address, Env};
 
@@ -56,17 +50,10 @@ mod progress_contract {
     #[derive(Copy, Clone, Debug, PartialEq)]
     #[repr(u32)]
     pub enum Error {
-        AlreadyInitialized = 1,
-        NotInitialized = 2,
-        ContractPaused = 3,
-        Unauthorized = 4,
-        InvalidProgressTransition = 5,
         AlreadyAtMaxLevel = 6,
-        PlayerNotFound = 7,
     }
 
     #[contractclient(name = "Client")]
-    #[allow(dead_code)]
     pub trait ProgressContractClient {
         fn advance_level(
             env: Env,
@@ -222,11 +209,52 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Atomically revoke multiple validators in a single transaction (admin only).
+    /// All validators in the list must be registered. Emits a `validator_revoked`
+    /// event for each. Returns the count of validators revoked.
+    pub fn batch_revoke_validators(
+        env: Env,
+        wallets: Vec<Address>,
+        reason: Option<String>,
+    ) -> Result<u32, VerificationError> {
+        Self::require_admin(&env)?;
+
+        if wallets.len() == 0 {
+            return Err(VerificationError::EmptyBatch);
+        }
+
+        if let Some(ref r) = reason {
+            if r.len() > 128 {
+                return Err(VerificationError::ReasonTooLong);
+            }
+        }
+
+        let reason_str = reason.unwrap_or(String::from_str(&env, ""));
+        let mut count: u32 = 0;
+
+        for i in 0..wallets.len() {
+            let wallet = wallets.get(i).unwrap();
+            let mut validator: Validator = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Validator(wallet.clone()))
+                .ok_or(VerificationError::ValidatorNotFound)?;
+            validator.active = false;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Validator(wallet.clone()), &validator);
+            events::validator_revoked(&env, &wallet, &reason_str);
+            count = count.checked_add(1).ok_or(VerificationError::Overflow)?;
+        }
+
+        Ok(count)
+    }
+
     pub fn pause_contract(env: Env) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(VerificationError::NotInitialized)?;
 
@@ -239,7 +267,7 @@ impl VerificationContract {
         Self::require_admin(&env)?;
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(VerificationError::NotInitialized)?;
 
@@ -320,10 +348,21 @@ impl VerificationContract {
             ledger_sequence: env.ledger().sequence(),
         };
 
+        let milestone_key = DataKey::Milestone(player_id, next_index);
         env.storage()
             .persistent()
-            .set(&DataKey::Milestone(player_id, next_index), &milestone);
+            .set(&milestone_key, &milestone);
         env.storage().persistent().set(&counter_key, &next_index);
+        env.storage().persistent().extend_ttl(
+            &milestone_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        env.storage().persistent().extend_ttl(
+            &counter_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         // Increment per-validator milestone count
         let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
@@ -331,12 +370,22 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&val_key, &(val_count.checked_add(1).ok_or(VerificationError::Overflow)?));
+        env.storage().persistent().extend_ttl(
+            &val_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
 
         env.storage().persistent().set(
             &vp_key,
             &(vp_count
                 .checked_add(1)
                 .ok_or(VerificationError::Overflow)?),
+        );
+        env.storage().persistent().extend_ttl(
+            &vp_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
         );
 
         // Increment global total milestone count
@@ -565,11 +614,11 @@ mod tests {
         client.register_validator(&v1, &String::from_str(&env, "Coach A"));
         client.register_validator(&v2, &String::from_str(&env, "Coach B"));
 
-        client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmEv1"));
+        client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, VALID_CID_V0));
         assert_eq!(client.get_total_milestone_count(), 1);
 
-        client.approve_milestone(&v1, &2u64, &String::from_str(&env, "m2"), &String::from_str(&env, "QmEv2"));
-        client.approve_milestone(&v2, &3u64, &String::from_str(&env, "m3"), &String::from_str(&env, "QmEv3"));
+        client.approve_milestone(&v1, &2u64, &String::from_str(&env, "m2"), &String::from_str(&env, VALID_CID_V1));
+        client.approve_milestone(&v2, &3u64, &String::from_str(&env, "m3"), &String::from_str(&env, VALID_CID_V0));
         assert_eq!(client.get_total_milestone_count(), 3);
 
         // per-validator counts still correct
@@ -802,6 +851,23 @@ mod tests {
 
     #[test]
     fn test_upgrade_preserves_admin() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        let reason: Option<String> = None;
+        client.revoke_validator(&validator, &reason);
+        assert!(!client.is_active_validator(&validator));
+    }
+
+    #[test]
     fn test_pause_unpause_events() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -913,7 +979,8 @@ mod tests {
         client.upgrade(&new_wasm_hash);
 
         // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator);
+        let reason: Option<String> = None;
+        client.revoke_validator(&validator, &reason);
         assert!(!client.is_active_validator(&validator));
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
