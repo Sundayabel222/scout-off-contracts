@@ -15,6 +15,8 @@ const INSTANCE_TTL_MAX: u32 = 500;
 const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 2000;
 
+const ADMIN_BUMP_LEDGERS: u32 = 2000;
+
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // #457: Minimal client for the verification contract.
@@ -37,6 +39,20 @@ mod verification_contract {
     }
 }
 
+// Minimal client for the registration contract.
+// Used to sync a player's progress level into the registration contract
+// whenever advance_level or reset_player_level is called.
+mod registration_contract {
+    use soroban_sdk::{contractclient, Env};
+    use crate::types::ProgressLevel;
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn set_player_level(env: Env, player_id: u64, level: ProgressLevel);
+    }
+}
+
 #[contract]
 pub struct ProgressContract;
 
@@ -56,25 +72,6 @@ impl ProgressContract {
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
-        Ok(())
-    }
-
-    /// Store the verification contract address allowed to call `advance_level`.
-    /// When set, only that contract may authorize level advances (admin only).
-    pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
-        Ok(())
-    }
-
-    /// Store the registration contract address so we can sync player levels (admin only).
-    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
         Ok(())
     }
 
@@ -141,6 +138,9 @@ impl ProgressContract {
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ProgressError> {
         Self::require_admin(&env)?;
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
     /// Reset a player's level for dispute resolution.
     /// Existing history is preserved; a new history entry records the reset.
     pub fn reset_player_level(
@@ -510,7 +510,6 @@ impl ProgressContract {
             .ok_or(ProgressError::NotInitialized)?;
         admin.require_auth();
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
-        Ok(())
         Ok(admin)
     }
 }
@@ -875,6 +874,15 @@ mod tests {
 
     #[test]
     fn test_upgrade_preserves_admin() {
+        let (env, client, validator) = setup();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works after upgrade
+        client.pause_contract();
+    }
+
+    #[test]
     fn test_reset_player_level_success() {
         let (env, client, validator) = setup();
         let player_id = 1u64;
