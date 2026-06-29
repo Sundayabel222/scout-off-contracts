@@ -928,6 +928,64 @@ mod tests {
     }
 
     #[test]
+    fn test_register_player_exactly_10_hashes_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let h = String::from_str(&env, "QmHash");
+        let hashes = vec![
+            &env,
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+        ];
+
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        assert_eq!(player_id, 1);
+
+        let profile = client.get_player(&player_id);
+        assert_eq!(profile.ipfs_hashes.len(), 10);
+    }
+
+    #[test]
+    fn test_register_player_11_hashes_fails_with_invalid_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let h = String::from_str(&env, "QmHash");
+        let hashes = vec![
+            &env,
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+            h.clone(),
+        ];
+
+        let result = client.try_register_player(&wallet, &vitals, &hashes);
+        assert_eq!(result, Err(Ok(ScoutChainError::InvalidInput)));
+    }
+
+    #[test]
     #[should_panic]
     fn test_register_player_too_many_hashes_fails() {
         let (env, client) = setup();
