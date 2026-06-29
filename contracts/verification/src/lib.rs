@@ -47,6 +47,8 @@ const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 // Maximum milestones one validator may approve for a single player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
+const MAX_DESCRIPTION_LEN: u32 = 256;
+
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
 // `set_progress_contract` before `approve_milestone` can advance levels.
@@ -284,6 +286,10 @@ impl VerificationContract {
     ) -> Result<u32, VerificationError> {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
+
+        if description.len() > MAX_DESCRIPTION_LEN as usize {
+            return Err(VerificationError::InvalidInput);
+        }
 
         validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
 
