@@ -70,6 +70,8 @@ pub enum DataKey {
     ProgressContract,
     /// scout → Vec<u64> of contacted player_ids
     ScoutContacts(Address),
+    /// player_id → Vec<Address> of scouts who have contacted this player
+    PlayerContacts(u64),
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),

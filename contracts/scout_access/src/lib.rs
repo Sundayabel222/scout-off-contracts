@@ -336,6 +336,25 @@ impl ScoutAccessContract {
             .persistent()
             .extend_ttl(&index_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
+        // Update player-centric inbound contact index so a player can list
+        // all scouts who have contacted them directly from on-chain state
+        // without replaying off-chain events.
+        let player_index_key = DataKey::PlayerContacts(player_id);
+        let mut inbound: soroban_sdk::Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&player_index_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !inbound.contains(&scout) {
+            inbound.push_back(scout.clone());
+        }
+        env.storage()
+            .persistent()
+            .set(&player_index_key, &inbound);
+        env.storage()
+            .persistent()
+            .extend_ttl(&player_index_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
         events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
         Ok(())
     }
@@ -399,6 +418,45 @@ impl ScoutAccessContract {
                 PERSISTENT_TTL_MIN,
                 PERSISTENT_TTL_MAX,
             );
+
+            // Update scout-centric outbound index
+            let scout_index_key = DataKey::ScoutContacts(scout.clone());
+            let mut scout_contacted: soroban_sdk::Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&scout_index_key)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            if !scout_contacted.contains(&player_id) {
+                scout_contacted.push_back(player_id);
+            }
+            env.storage()
+                .persistent()
+                .set(&scout_index_key, &scout_contacted);
+            env.storage().persistent().extend_ttl(
+                &scout_index_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+
+            // Update player-centric inbound index
+            let player_index_key = DataKey::PlayerContacts(player_id);
+            let mut inbound: soroban_sdk::Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&player_index_key)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            if !inbound.contains(&scout) {
+                inbound.push_back(scout.clone());
+            }
+            env.storage()
+                .persistent()
+                .set(&player_index_key, &inbound);
+            env.storage().persistent().extend_ttl(
+                &player_index_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+
             events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
         }
 
@@ -566,6 +624,25 @@ impl ScoutAccessContract {
     pub fn get_scout_contacts(env: Env, scout: Address) -> soroban_sdk::Vec<u64> {
         Self::bump_instance_ttl(&env);
         let key = DataKey::ScoutContacts(scout.clone());
+        let list = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !list.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        list
+    }
+
+    /// Return all scout addresses that have contacted `player_id` as an O(1)
+    /// index lookup.  Players can audit their inbound contact history directly
+    /// from on-chain state without replaying off-chain events.
+    pub fn get_player_contacts(env: Env, player_id: u64) -> soroban_sdk::Vec<Address> {
+        Self::bump_instance_ttl(&env);
+        let key = DataKey::PlayerContacts(player_id);
         let list = env
             .storage()
             .persistent()
@@ -1040,6 +1117,71 @@ mod tests {
         client.pay_to_contact(&scout, &1u64);
         // second contact with same player should panic
         client.pay_to_contact(&scout, &1u64);
+    }
+
+    #[test]
+    fn test_player_contacts_index_updated_on_pay_to_contact() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout1 = Address::generate(&env);
+        let scout2 = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout1, 100_000_000);
+        mint_token(&env, &xlm, &admin, &scout2, 100_000_000);
+
+        // Before any contact the inbound index is empty.
+        assert_eq!(client.get_player_contacts(&1u64).len(), 0);
+
+        // First scout contacts the player.
+        client.subscribe(&scout1, &SubscriptionTier::Pro);
+        client.pay_to_contact(&scout1, &1u64);
+
+        let contacts = client.get_player_contacts(&1u64);
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts.get(0).unwrap(), scout1);
+
+        // Second scout contacts the same player.
+        client.subscribe(&scout2, &SubscriptionTier::Pro);
+        client.pay_to_contact(&scout2, &1u64);
+
+        let contacts = client.get_player_contacts(&1u64);
+        assert_eq!(contacts.len(), 2);
+        assert!(contacts.contains(&scout1));
+        assert!(contacts.contains(&scout2));
+    }
+
+    #[test]
+    fn test_player_contacts_not_duplicated_on_repeated_contact_attempt() {
+        // The ContactRecord guard prevents a second pay_to_contact, so the
+        // inbound index should never grow beyond the set of unique scouts.
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+        client.pay_to_contact(&scout, &1u64);
+
+        // Trying a second time should fail (AlreadyContacted), so the index stays at 1.
+        let result = client.try_pay_to_contact(&scout, &1u64);
+        assert!(result.is_err());
+
+        assert_eq!(client.get_player_contacts(&1u64).len(), 1);
+    }
+
+    #[test]
+    fn test_player_contacts_independent_per_player() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        // Scout contacts two different players.
+        client.pay_to_contact(&scout, &1u64);
+        client.pay_to_contact(&scout, &2u64);
+
+        // Each player's inbound index contains only this scout.
+        assert_eq!(client.get_player_contacts(&1u64).len(), 1);
+        assert_eq!(client.get_player_contacts(&2u64).len(), 1);
+        // Player 3 was never contacted.
+        assert_eq!(client.get_player_contacts(&3u64).len(), 0);
     }
 
     #[test]
