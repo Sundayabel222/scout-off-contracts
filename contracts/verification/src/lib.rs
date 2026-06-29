@@ -30,6 +30,11 @@ const MAX_CREDENTIALS_LEN: u32 = 256;
 /// is bounded by Soroban's 64 KB per-entry limit.
 const MAX_VALIDATORS: u32 = 100;
 
+const ADMIN_BUMP_LEDGERS: u32 = 518400; // ~30 days at 5s/ledger
+
+/// Maximum milestones a single validator may approve for one player.
+const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
+
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Generated client for the progress contract — used for cross-contract calls.
@@ -39,32 +44,6 @@ mod progress_contract {
     soroban_sdk::contractimport!(
         file = "fixtures/scoutchain_progress.wasm"
     );
-    use scoutchain_shared_types::ProgressLevel;
-    use soroban_sdk::{contractclient, contracterror, Address, Env};
-
-    #[contracterror]
-    #[derive(Copy, Clone, Debug, PartialEq)]
-    #[repr(u32)]
-    pub enum Error {
-        AlreadyInitialized = 1,
-        NotInitialized = 2,
-        ContractPaused = 3,
-        Unauthorized = 4,
-        InvalidProgressTransition = 5,
-        AlreadyAtMaxLevel = 6,
-        PlayerNotFound = 7,
-    }
-
-    #[contractclient(name = "Client")]
-    #[allow(dead_code)]
-    pub trait ProgressContractClient {
-        fn advance_level(
-            env: Env,
-            caller: Address,
-            player_id: u64,
-            milestone_ref: u32,
-        ) -> Result<ProgressLevel, Error>;
-    }
 }
 
 #[contract]
@@ -216,7 +195,7 @@ impl VerificationContract {
         Self::require_admin(&env)?;
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(VerificationError::NotInitialized)?;
 
@@ -229,7 +208,7 @@ impl VerificationContract {
         Self::require_admin(&env)?;
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(VerificationError::NotInitialized)?;
 
@@ -259,6 +238,9 @@ impl VerificationContract {
     /// Each milestone records the Stellar ledger sequence number for
     /// tamper-proof auditability.
     ///
+    /// NOTE: Age validation of the evidence is the responsibility of the off-chain
+    /// validator review process.
+    ///
     /// Returns the milestone index for this player.
     pub fn approve_milestone(
         env: Env,
@@ -281,6 +263,12 @@ impl VerificationContract {
 
         if !validator.active {
             return Err(VerificationError::ValidatorInactive);
+        }
+
+        // Global uniqueness check: reject if the evidence has already been used.
+        let evidence_used_key = DataKey::EvidenceUsed(evidence_hash.clone());
+        if env.storage().persistent().has(&evidence_used_key) {
+            return Err(VerificationError::DuplicateEvidence);
         }
 
         let vp_key = DataKey::ValidatorPlayerMilestoneCount(validator_wallet.clone(), player_id);
@@ -314,6 +302,9 @@ impl VerificationContract {
             .persistent()
             .set(&DataKey::Milestone(player_id, next_index), &milestone);
         env.storage().persistent().set(&counter_key, &next_index);
+
+        // Mark the evidence hash as globally used
+        env.storage().persistent().set(&evidence_used_key, &true);
 
         // Increment per-validator milestone count
         let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
@@ -362,7 +353,7 @@ impl VerificationContract {
             // Any other error propagates as ProgressCallFailed.
             match progress_client.try_advance_level(&validator_wallet, &player_id, &next_index) {
                 Ok(_) => {}
-                Err(Ok(progress_contract::Error::AlreadyAtMaxLevel)) => {}
+                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {}
                 Err(_) => return Err(VerificationError::ProgressCallFailed),
             }
         }
@@ -524,12 +515,17 @@ mod tests {
             0
         );
 
+        let cids = [
+            String::from_str(&env, VALID_CID_V0),
+            String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqC"),
+            String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqD"),
+        ];
         for i in 1u64..=3 {
             client.approve_milestone(
                 &validator,
                 &i,
                 &String::from_str(&env, "milestone"),
-                &String::from_str(&env, VALID_CID_V0),
+                &cids[(i - 1) as usize],
             );
         }
 
@@ -550,11 +546,11 @@ mod tests {
         client.register_validator(&v1, &String::from_str(&env, "Coach A"));
         client.register_validator(&v2, &String::from_str(&env, "Coach B"));
 
-        client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmEv1"));
+        client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
         assert_eq!(client.get_total_milestone_count(), 1);
 
-        client.approve_milestone(&v1, &2u64, &String::from_str(&env, "m2"), &String::from_str(&env, "QmEv2"));
-        client.approve_milestone(&v2, &3u64, &String::from_str(&env, "m3"), &String::from_str(&env, "QmEv3"));
+        client.approve_milestone(&v1, &2u64, &String::from_str(&env, "m2"), &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqC"));
+        client.approve_milestone(&v2, &3u64, &String::from_str(&env, "m3"), &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqD"));
         assert_eq!(client.get_total_milestone_count(), 3);
 
         // per-validator counts still correct
@@ -786,7 +782,6 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_preserves_admin() {
     fn test_pause_unpause_events() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -885,8 +880,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #9)")]
-    fn test_register_validator_credentials_257_bytes_fails() {
+    fn test_upgrade_preserves_admin() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -898,8 +892,18 @@ mod tests {
         client.upgrade(&new_wasm_hash);
 
         // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator);
+        client.revoke_validator(&validator, &None);
         assert!(!client.is_active_validator(&validator));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_register_validator_credentials_257_bytes_fails() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
         client.register_validator(&validator, &String::from_str(&env, &too_long));
@@ -1107,5 +1111,43 @@ mod tests {
             &String::from_str(&env, "test"),
             &String::from_str(&env, "zdj7WbTaiJT1fgatdet7Sjxf4PJQgXkGfXPFgq5a2SdxYqYg"),
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #16)")]
+    fn test_approve_milestone_duplicate_evidence_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let desc = String::from_str(&env, "milestone 1");
+        let evidence = String::from_str(&env, VALID_CID_V0);
+
+        client.approve_milestone(&validator, &1u64, &desc, &evidence);
+
+        // Approve again for the same player, same evidence -> must fail
+        client.approve_milestone(&validator, &1u64, &String::from_str(&env, "milestone 2"), &evidence);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #16)")]
+    fn test_approve_milestone_duplicate_evidence_rejected_different_players() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let desc = String::from_str(&env, "milestone");
+        let evidence = String::from_str(&env, VALID_CID_V0);
+
+        client.approve_milestone(&validator, &1u64, &desc, &evidence);
+
+        // Approve for a different player using the same evidence -> must fail due to global uniqueness
+        client.approve_milestone(&validator, &2u64, &desc, &evidence);
     }
 }
