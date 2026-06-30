@@ -82,15 +82,17 @@ impl ProgressContract {
 
     pub fn pause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        let admin = Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
+        events::contract_paused(&env, &admin);
         Ok(())
     }
 
     pub fn unpause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        let admin = Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
+        events::contract_unpaused(&env, &admin);
         Ok(())
     }
 
@@ -1128,4 +1130,59 @@ mod tests {
         let result = prog_client2.try_advance_level(&caller, &1u64, &99u32);
         assert_eq!(result, Err(Ok(ProgressError::NotInitialized)));
     }
+
+    #[test]
+    fn test_get_level_returns_unverified_when_no_advance() {
+        let (_, client, _) = setup();
+        assert_eq!(client.get_level(&999u64), ProgressLevel::Unverified);
+    }
+
+    #[test]
+    fn test_get_history_count_returns_zero_when_no_progress() {
+        let (_, client, _) = setup();
+        assert_eq!(client.get_history_count(&999u64), 0);
+    }
+
+    #[test]
+    fn test_pause_unpause_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        client.pause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_paused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_unpaused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+    }
+}
+
+
 }
