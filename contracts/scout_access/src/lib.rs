@@ -6,7 +6,7 @@ use errors::ScoutAccessError;
 use types::{ContactRecord, DataKey, Subscription, TrialOffer};
 pub use types::{FeeConfig, SubscriptionTier};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
 
 use scoutchain_shared_types::{validate_cid, ContractHealth};
 
@@ -1419,6 +1419,40 @@ mod tests {
         let offer = client.get_trial_offer(&1u64, &1u32);
         assert_eq!(offer.player_id, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
+    }
+
+    /// Issue: a scout whose Elite subscription has expired must not be able to
+    /// log a trial offer. Verifies that `try_log_trial_offer` returns
+    /// `Err(Ok(ScoutAccessError::SubscriptionExpired))` once the ledger
+    /// timestamp is advanced past `expires_at`, and that no trial offer is
+    /// stored after the rejected call.
+    #[test]
+    fn test_log_trial_offer_rejected_after_subscription_expires() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+
+        // Fund the scout and subscribe to Elite tier.
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Confirm the subscription was recorded correctly.
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Elite);
+        assert!(sub.expires_at > sub.subscribed_at);
+
+        // Advance the ledger timestamp one second past the subscription expiry.
+        env.ledger().with_mut(|l| {
+            l.timestamp = sub.expires_at + 1;
+        });
+
+        // try_log_trial_offer must return SubscriptionExpired.
+        let player_id: u64 = 1;
+        let details_hash = String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB");
+        let result = client.try_log_trial_offer(&scout, &player_id, &details_hash);
+        assert_eq!(result, Err(Ok(ScoutAccessError::SubscriptionExpired)));
+
+        // No trial offer must have been stored after the rejected call.
+        assert_eq!(client.get_trial_count(&player_id), 0);
     }
 
     #[test]

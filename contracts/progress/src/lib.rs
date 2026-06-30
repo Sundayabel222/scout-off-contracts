@@ -39,6 +39,20 @@ mod verification_contract {
     }
 }
 
+// Minimal client for the registration contract.
+// Used to sync a player's progress level into the registration contract
+// whenever advance_level or reset_player_level is called.
+mod registration_contract {
+    use soroban_sdk::{contractclient, Env};
+    use crate::types::ProgressLevel;
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn set_player_level(env: Env, player_id: u64, level: ProgressLevel);
+    }
+}
+
 #[contract]
 pub struct ProgressContract;
 
@@ -58,25 +72,6 @@ impl ProgressContract {
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
-        Ok(())
-    }
-
-    /// Store the verification contract address allowed to call `advance_level`.
-    /// When set, only that contract may authorize level advances (admin only).
-    pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
-        Ok(())
-    }
-
-    /// Store the registration contract address so we can sync player levels (admin only).
-    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
         Ok(())
     }
 
