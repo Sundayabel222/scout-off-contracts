@@ -928,6 +928,7 @@ mod tests {
             pro_sub_stroops: 3_000_000,
             elite_sub_stroops: 7_000_000,
             sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 10,
         }
     }
 
@@ -1270,6 +1271,8 @@ mod tests {
         let sub = client.get_subscription(&scout);
         assert_eq!(sub.tier, SubscriptionTier::Basic);
     }
+
+    #[test]
     fn test_pause_unpause_events() {
         let (env, admin, _, _, client) = setup();
 
@@ -1706,18 +1709,7 @@ mod tests {
         let contract_balance_after = TokenClient::new(&env, &xlm).balance(&client.address);
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
-        assert_eq!(
-    contract_balance_before - refund_amount,
-    contract_balance_after
-);
-
-assert_eq!(
-    scout_balance_before + refund_amount,
-    scout_balance_after
-);
-            contract_balance_before - refund_amount,
-            contract_balance_after
-        );
+        assert_eq!(contract_balance_before - refund_amount, contract_balance_after);
         assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
     }
 
@@ -2037,5 +2029,38 @@ assert_eq!(
         );
         assert!(result.is_ok());
         assert_eq!(client.get_trial_count(&player_id), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // #435: refund_subscription access control — non-admin must be rejected
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_refund_subscription_non_admin_is_unauthorized() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        let contract_balance = TokenClient::new(&env, &xlm).balance(&client.address);
+        assert_eq!(contract_balance, 1_000_000);
+
+        // Remove all auth mocks so admin.require_auth() inside require_admin fails.
+        env.mock_auths(&[]);
+        let refund_amount = 500_000i128;
+        let result = client.try_refund_subscription(&scout, &refund_amount);
+        assert!(result.is_err());
+
+        // Re-enable auth and verify contract XLM balance is unchanged.
+        env.mock_all_auths();
+        let contract_balance_after = TokenClient::new(&env, &xlm).balance(&client.address);
+        assert_eq!(contract_balance_after, contract_balance);
+
+        // Admin can still refund successfully after the failed attempt.
+        client.refund_subscription(&scout, &refund_amount);
+        assert_eq!(
+            TokenClient::new(&env, &xlm).balance(&client.address),
+            contract_balance - refund_amount
+        );
     }
 }
