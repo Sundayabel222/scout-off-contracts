@@ -107,9 +107,14 @@ impl ScoutAccessContract {
         Self::bump_instance_ttl(&env);
         Self::require_admin(&env)?;
         Self::validate_fee_config(&fee_config)?;
+        
+        let old_config = Self::fee_config(&env);
+        
         env.storage()
             .instance()
             .set(&DataKey::FeeConfig, &fee_config);
+        
+        events::fee_config_updated(&env, &old_config, &fee_config);
         Ok(())
     }
 
@@ -433,7 +438,7 @@ impl ScoutAccessContract {
     pub fn batch_contact_players(
         env: Env,
         scout: Address,
-        player_ids: Vec<u64>,
+        player_ids: soroban_sdk::Vec<u64>,
     ) -> Result<u32, ScoutAccessError> {
         Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
@@ -928,6 +933,7 @@ mod tests {
             pro_sub_stroops: 3_000_000,
             elite_sub_stroops: 7_000_000,
             sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 10,
         }
     }
 
@@ -988,14 +994,16 @@ mod tests {
 
     #[test]
     fn test_fee_config_updated_event_contains_old_and_new_config() {
-        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let (env, _admin, _xlm, contract_id, client) = setup();
 
+        let old_config = default_fees();
         let new_fees = FeeConfig {
             contact_fee_stroops: 200_000,
             basic_sub_stroops: 2_000_000,
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            pro_contact_limit: 20,
         };
 
         client.update_fee_config(&new_fees);
@@ -1003,6 +1011,25 @@ mod tests {
         // Storage must reflect the new config.
         let stored = client.get_fee_config();
         assert_eq!(stored.contact_fee_stroops, new_fees.contact_fee_stroops);
+        assert_eq!(stored.pro_contact_limit, new_fees.pro_contact_limit);
+
+        // Assert that the fee_config_updated event was emitted with old and new config
+        let events = env.events().all().filter_by_contract(&contract_id);
+        assert_eq!(events.len(), 1);
+        
+        let event = events.get(0).unwrap();
+        assert_eq!(
+            event.0,
+            contract_id
+        );
+        assert_eq!(
+            event.1,
+            (Symbol::new(&env, "fee_config_updated"),).into_val(&env)
+        );
+        assert_eq!(
+            event.2,
+            (old_config, new_fees).into_val(&env)
+        );
     }
 
     #[test]
@@ -1504,6 +1531,7 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            pro_contact_limit: 15,
         };
         let result = client.try_update_fee_config(&new_fees);
         assert!(result.is_ok());
@@ -1777,14 +1805,6 @@ mod tests {
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
         assert_eq!(
-    contract_balance_before - refund_amount,
-    contract_balance_after
-);
-
-assert_eq!(
-    scout_balance_before + refund_amount,
-    scout_balance_after
-);
             contract_balance_before - refund_amount,
             contract_balance_after
         );
