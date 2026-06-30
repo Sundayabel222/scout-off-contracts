@@ -1,4 +1,3 @@
-#![no_std]
 // IMPORTANT: Cross-contract wiring required after deployment
 //
 // `approve_milestone` calls `advance_level` on the progress contract to update
@@ -17,7 +16,7 @@ mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone, Validator, ValidatorStatus};
+use types::{ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone, MilestoneDispute, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -26,18 +25,7 @@ use scoutchain_shared_types::validate_cid;
 const MAX_CREDENTIALS_LEN: u32 = 256;
 const MAX_GLOBAL_MILESTONE_INDEX: u32 = 500;
 
-const ADMIN_BUMP_LEDGERS: u32 = 10000;
-
-const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
-
-/// Maximum number of simultaneously registered validators.
-/// Increase requires a contract upgrade because the ValidatorVector entry
-/// is bounded by Soroban's 64 KB per-entry limit.
-const MAX_VALIDATORS: u32 = 100;
-
-const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// Persistent storage TTL bump for milestone records and admin key.
+// Persistent storage TTL bump for milestone records.
 const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 2_000;
 
@@ -46,6 +34,13 @@ const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 
 // Maximum milestones one validator may approve for a single player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
+
+/// Maximum number of simultaneously registered validators.
+/// Increase requires a contract upgrade because the ValidatorVector entry
+/// is bounded by Soroban's 64 KB per-entry limit.
+const MAX_VALIDATORS: u32 = 100;
+
+const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
@@ -931,7 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_preserves_admin() {
     fn test_pause_unpause_events() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -1043,7 +1037,8 @@ mod tests {
         client.upgrade(&new_wasm_hash);
 
         // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator);
+        let reason: Option<soroban_sdk::String> = None;
+        client.revoke_validator(&validator, &reason);
         assert!(!client.is_active_validator(&validator));
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
@@ -1396,5 +1391,42 @@ mod tests {
         // Assert counters are unchanged.
         assert_eq!(client.get_milestone_count(&player_id), milestone_count_before);
         assert_eq!(client.get_validator_milestone_count(&validator), validator_count_before);
+    }
+
+    // -------------------------------------------------------------------------
+    // #434: update_progress_contract must emit progress_contract_updated event
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_update_progress_contract_emits_progress_contract_updated_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+
+        // Set the initial progress contract address.
+        client.set_progress_contract(&addr1);
+
+        // Drain all events accumulated so far (contract_initialized + set call).
+        let _ = env.events().all();
+
+        // Update to a new address.
+        client.update_progress_contract(&addr2);
+
+        // Only the update event should remain in the buffer.
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "progress_contract_updated"),).into_val(&env),
+                    addr2.clone().into_val(&env),
+                )
+            ]
+        );
     }
 }
