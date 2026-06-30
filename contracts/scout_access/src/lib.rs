@@ -62,6 +62,11 @@ const MIN_UPGRADE_INTERVAL_SECS: u64 = 3600;
 // to the same player — enforces one pending offer per (scout, player) per day.
 const TRIAL_OFFER_COOLDOWN_SECS: u64 = 86_400; // 24 hours
 
+// Minimum fee floors (stroops) to prevent admin from setting negligible fees
+// that would effectively remove the monetization model.
+const MIN_CONTACT_FEE_STROOPS: i128 = 100_000;      // 0.01 XLM
+const MIN_SUB_FEE_STROOPS: i128 = 1_000_000;        // 0.1 XLM
+
 #[contract]
 pub struct ScoutAccessContract;
 
@@ -1145,12 +1150,12 @@ impl ScoutAccessContract {
         Self::accumulate_fee(env, amount)
     }
 
-    /// Validate that every fee field is positive and sub_duration_secs is non-zero.
+    /// Validate that every fee field meets the minimum floor and sub_duration_secs is non-zero.
     fn validate_fee_config(config: &FeeConfig) -> Result<(), ScoutAccessError> {
-        if config.contact_fee_stroops <= 0
-            || config.basic_sub_stroops <= 0
-            || config.pro_sub_stroops <= 0
-            || config.elite_sub_stroops <= 0
+        if config.contact_fee_stroops < MIN_CONTACT_FEE_STROOPS
+            || config.basic_sub_stroops < MIN_SUB_FEE_STROOPS
+            || config.pro_sub_stroops < MIN_SUB_FEE_STROOPS
+            || config.elite_sub_stroops < MIN_SUB_FEE_STROOPS
             || config.sub_duration_secs == 0
             || config.pro_contact_limit == 0
         {
