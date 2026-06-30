@@ -16,6 +16,8 @@ const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 2000;
 const ADMIN_BUMP_LEDGERS: u32 = 1000;
 
+const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // #457: Minimal client for the verification contract.
@@ -35,6 +37,20 @@ mod verification_contract {
     #[allow(dead_code)]
     pub trait VerificationContractClient {
         fn get_milestone_count(env: Env, player_id: u64) -> u32;
+    }
+}
+
+// Minimal client for the registration contract.
+// Used to sync a player's progress level into the registration contract
+// whenever advance_level or reset_player_level is called.
+mod registration_contract {
+    use soroban_sdk::{contractclient, Env};
+    use crate::types::ProgressLevel;
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait RegistrationContractClient {
+        fn set_player_level(env: Env, player_id: u64, level: ProgressLevel);
     }
 }
 
@@ -60,41 +76,19 @@ impl ProgressContract {
         Ok(())
     }
 
-    /// Store the registration contract address so we can sync player levels (admin only).
-    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::RegistrationContract, &addr);
-        Ok(())
-    }
-
     pub fn pause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        let admin = Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
+        events::contract_paused(&env, &admin);
         Ok(())
     }
 
     pub fn unpause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
+        let admin = Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
-        Ok(())
-    }
-
-    /// Register the verification contract address so advance_level can
-    /// authenticate callers (admin only). Must be called before any
-    /// advance_level call — without it, advance_level returns NotInitialized.
-    pub fn set_verification_contract(
-        env: Env,
-        addr: Address,
-    ) -> Result<(), ProgressError> {
-        Self::bump_instance_ttl(&env);
-        Self::require_admin(&env)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::VerificationContract, &addr);
+        events::contract_unpaused(&env, &admin);
         Ok(())
     }
 
@@ -298,10 +292,17 @@ impl ProgressContract {
 
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
         Self::bump_instance_ttl(&env);
-        env.storage()
+        let count: u32 = env
+            .storage()
             .persistent()
             .get(&DataKey::HistoryCounter(player_id))
-            .unwrap_or(0u32)
+            .unwrap_or(0u32);
+        env.storage().persistent().extend_ttl(
+            &DataKey::HistoryCounter(player_id),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+        count
     }
 
     pub fn get_history_entry(
@@ -379,6 +380,38 @@ impl ProgressContract {
         entries
     }
 
+    /// Query history entries for a player since a given Unix timestamp.
+    /// Returns all entries where `updated_at >= since_timestamp`.
+    /// Uses the HistoryVec for O(1) lookup, filters in-memory.
+    pub fn get_history_since(
+        env: Env,
+        player_id: u64,
+        since_timestamp: u64,
+    ) -> Vec<ProgressEntry> {
+        let vec_key = DataKey::HistoryVec(player_id);
+        let history: Vec<ProgressEntry> = env
+            .storage()
+            .persistent()
+            .get(&vec_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if !history.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+
+        let mut result: Vec<ProgressEntry> = Vec::new(&env);
+        for i in 0..history.len() {
+            if let Some(entry) = history.get(i) {
+                if entry.updated_at >= since_timestamp {
+                    result.push_back(entry);
+                }
+            }
+        }
+        result
+    }
+
     pub fn health(env: Env) -> ContractHealth {
         Self::bump_instance_ttl(&env);
         let initialized = env
@@ -419,6 +452,34 @@ impl ProgressContract {
             .unwrap_or(ProgressLevel::Unverified)
     }
 
+    /// Record a progress entry for a player.
+    ///
+    /// ## Storage cost trade-off (HistoryCounter)
+    ///
+    /// Each call performs a read + write on `DataKey::HistoryCounter(player_id)`.
+    /// On Soroban, persistent writes are the most expensive storage operation.
+    /// For high-frequency players this is two storage ops per call.
+    ///
+    /// **Current approach (separate counter key):**
+    /// - Simple, O(1) counter read for `get_history_count`.
+    /// - Two storage ops per `advance_level` call (read + write counter).
+    ///
+    /// **Alternative A — inline counter in HistoryVec:**
+    /// Store the count as `history.len()`. Eliminates the separate counter key
+    /// entirely, saving one persistent read + write per call. However,
+    /// `get_history_count` would require loading the full Vec just to read
+    /// its length, which becomes expensive as history grows.
+    ///
+    /// **Alternative B — batch accumulation:**
+    /// If batch milestone approval is implemented, accumulate counter
+    /// increments in memory and flush a single write at the end of the
+    /// batch. This amortises the write cost across N milestones but adds
+    /// complexity and is only beneficial when batch operations exist.
+    ///
+    /// **Decision:** Keep the current separate-counter approach for its
+    /// simplicity and O(1) count queries. Revisit if batch milestone
+    /// approval is implemented or if per-player milestone frequency
+    /// exceeds ~10 per ledger close window.
     fn record_progress_entry(
         env: &Env,
         player_id: u64,
@@ -821,6 +882,46 @@ mod tests {
         client.transfer_admin(&Address::generate(&env));
     }
 
+    /// Asserts that `transfer_admin` publishes an `admin_transferred` event whose
+    /// data payload carries exactly the old and new admin addresses, in that order.
+    /// A silent regression in event emission (wrong addresses, missing event, wrong
+    /// symbol) would be caught immediately by this test.
+    #[test]
+    fn test_transfer_admin_emits_event_with_correct_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &contract_id);
+
+        let old_admin = Address::generate(&env);
+        client.initialize(&old_admin);
+
+        // Wire a dummy verification contract (required by advance_level; not relevant here)
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&new_admin);
+
+        // events::admin_transferred publishes:
+        //   topics : (Symbol("admin_transferred"),)
+        //   data   : (old_admin, new_admin)
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    soroban_sdk::vec![
+                        &env,
+                        Symbol::new(&env, "admin_transferred").into_val(&env),
+                    ],
+                    (old_admin.clone(), new_admin.clone()).into_val(&env),
+                )
+            ]
+        );
+    }
+
     #[test]
     fn test_pause_and_unpause() {
         let (env, client, validator) = setup();
@@ -862,6 +963,40 @@ mod tests {
         client.pause_contract();
     }
 
+    #[test]
+    fn test_upgrade_preserves_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register a player so we confirm persistent data also survives
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let player_id = 1u64;
+        client.advance_level(&verification, &player_id, &1u32);
+
+        // Simulate upgrade: in testutils mode the host accepts empty bytes
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.pause_contract();
+
+        // Existing data persisted
+        assert_eq!(
+            client.get_level(&player_id),
+            ProgressLevel::VerifiedIdentity
+        );
+    }
+
+    #[test]
     fn test_reset_player_level_success() {
         let (env, client, validator) = setup();
         let player_id = 1u64;
@@ -1004,7 +1139,7 @@ mod tests {
         prog_client.set_verification_contract(&ver_id);
 
         let validator = Address::generate(&env);
-        ver_client.register_validator(&validator, &soroban_sdk::String::from_str(&env, "Coach"));
+        ver_client.register_validator(&validator, &soroban_sdk::String::from_str(&env, "UEFA-B-License"));
         // Approve one milestone for player 1 → milestone_ref 1 is valid.
         ver_client.approve_milestone(
             &validator,
@@ -1055,4 +1190,59 @@ mod tests {
         let result = prog_client2.try_advance_level(&caller, &1u64, &99u32);
         assert_eq!(result, Err(Ok(ProgressError::NotInitialized)));
     }
+
+    #[test]
+    fn test_get_level_returns_unverified_when_no_advance() {
+        let (_, client, _) = setup();
+        assert_eq!(client.get_level(&999u64), ProgressLevel::Unverified);
+    }
+
+    #[test]
+    fn test_get_history_count_returns_zero_when_no_progress() {
+        let (_, client, _) = setup();
+        assert_eq!(client.get_history_count(&999u64), 0);
+    }
+
+    #[test]
+    fn test_pause_unpause_events() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        client.pause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_paused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_unpaused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+    }
+}
+
+
 }
