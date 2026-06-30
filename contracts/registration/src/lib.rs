@@ -341,10 +341,15 @@ impl RegistrationContract {
     }
 
     pub fn get_scout(env: Env, scout_id: u64) -> Result<ScoutProfile, ScoutChainError> {
-        env.storage()
+        let profile: ScoutProfile = env
+            .storage()
             .persistent()
             .get(&DataKey::Scout(scout_id))
-            .ok_or(ScoutChainError::ScoutNotFound)
+            .ok_or(ScoutChainError::ScoutNotFound)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Scout(scout_id), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(profile)
     }
 
     /// Verify a scout profile (admin only).
@@ -1839,5 +1844,44 @@ fn test_upgrade_preserves_admin() {
         let profile = client.get_player(&player_id);
         assert_eq!(profile.wallet, wallet);
         assert_eq!(profile.level, ProgressLevel::Unverified);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #449: get_scout must extend persistent TTL on every read
+    // -------------------------------------------------------------------------
+
+    /// Registers a scout, advances the ledger sequence past the default Soroban
+    /// persistent TTL (4096 ledgers), then asserts that `get_scout` still returns
+    /// the profile successfully.
+    ///
+    /// Without the `extend_ttl` call in `get_scout`, the Scout persistent key
+    /// expires after the initial TTL elapses and `get_scout` returns ScoutNotFound.
+    /// The fix causes every `get_scout` call to refresh the TTL.
+    #[test]
+    fn test_get_scout_ttl_bump_keeps_profile_readable() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+            l.max_entry_ttl = 100_000;
+        });
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        // Advance well past the default 4 096-ledger TTL.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100 + 5_000;
+        });
+
+        // get_scout must still succeed because the TTL is bumped on read.
+        let profile = client.get_scout(&scout_id);
+        assert_eq!(profile.wallet, wallet);
+        assert_eq!(profile.region, region);
     }
 }
