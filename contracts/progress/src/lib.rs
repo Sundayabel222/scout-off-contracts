@@ -451,6 +451,34 @@ impl ProgressContract {
             .unwrap_or(ProgressLevel::Unverified)
     }
 
+    /// Record a progress entry for a player.
+    ///
+    /// ## Storage cost trade-off (HistoryCounter)
+    ///
+    /// Each call performs a read + write on `DataKey::HistoryCounter(player_id)`.
+    /// On Soroban, persistent writes are the most expensive storage operation.
+    /// For high-frequency players this is two storage ops per call.
+    ///
+    /// **Current approach (separate counter key):**
+    /// - Simple, O(1) counter read for `get_history_count`.
+    /// - Two storage ops per `advance_level` call (read + write counter).
+    ///
+    /// **Alternative A — inline counter in HistoryVec:**
+    /// Store the count as `history.len()`. Eliminates the separate counter key
+    /// entirely, saving one persistent read + write per call. However,
+    /// `get_history_count` would require loading the full Vec just to read
+    /// its length, which becomes expensive as history grows.
+    ///
+    /// **Alternative B — batch accumulation:**
+    /// If batch milestone approval is implemented, accumulate counter
+    /// increments in memory and flush a single write at the end of the
+    /// batch. This amortises the write cost across N milestones but adds
+    /// complexity and is only beneficial when batch operations exist.
+    ///
+    /// **Decision:** Keep the current separate-counter approach for its
+    /// simplicity and O(1) count queries. Revisit if batch milestone
+    /// approval is implemented or if per-player milestone frequency
+    /// exceeds ~10 per ledger close window.
     fn record_progress_entry(
         env: &Env,
         player_id: u64,

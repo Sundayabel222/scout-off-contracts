@@ -284,6 +284,15 @@ impl ScoutAccessContract {
             subscribed_at: now,
         };
 
+        // Remove scout from old tier index if upgrading
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
+        {
+            Self::remove_from_tier_index(&env, &scout, &existing.tier);
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::Subscription(scout.clone()), &sub);
@@ -997,6 +1006,40 @@ impl ScoutAccessContract {
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
+
+    fn add_to_tier_index(env: &Env, scout: &Address, tier: &SubscriptionTier) {
+        let key = DataKey::TierSubscribers(tier.clone());
+        let mut subscribers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if !subscribers.contains(scout) {
+            subscribers.push_back(scout.clone());
+        }
+        env.storage().persistent().set(&key, &subscribers);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+    }
+
+    fn remove_from_tier_index(env: &Env, scout: &Address, tier: &SubscriptionTier) {
+        let key = DataKey::TierSubscribers(tier.clone());
+        if let Some(subscribers) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<Address>>(&key)
+        {
+            let mut new_list: Vec<Address> = Vec::new(env);
+            for i in 0..subscribers.len() {
+                let addr = subscribers.get(i).unwrap();
+                if &addr != scout {
+                    new_list.push_back(addr);
+                }
+            }
+            env.storage().persistent().set(&key, &new_list);
+        }
+    }
 
     fn require_admin(env: &Env) -> Result<(), ScoutAccessError> {
     let admin: Address = env
