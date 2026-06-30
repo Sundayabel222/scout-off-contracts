@@ -41,6 +41,15 @@ const MIN_PLAYER_AGE: u32 = 16;
 /// Maximum scoutable age for player registration.
 const MAX_PLAYER_AGE: u32 = 45;
 
+/// Minimum scoutable age for player registration.
+/// Players younger than this age cannot be registered on the platform.
+/// Enforced by `register_player` to ensure off-chain age-gated scouting
+/// rules can rely on the contract's on-chain guarantee.
+const MIN_PLAYER_AGE: u32 = 16;
+
+/// Maximum scoutable age for player registration.
+const MAX_PLAYER_AGE: u32 = 45;
+
 // Instance TTL bump
 const INSTANCE_TTL_MIN: u32 = 100;
 const INSTANCE_TTL_MAX: u32 = 500;
