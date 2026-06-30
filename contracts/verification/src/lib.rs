@@ -17,7 +17,7 @@ mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone, Validator, ValidatorStatus};
+use types::{ContractHealth, DataKey, GlobalMilestoneEntry, GlobalMilestoneIndexPage, Milestone, MilestoneDispute, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -40,12 +40,6 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Persistent storage TTL bump for milestone records and admin key.
 const PERSISTENT_TTL_MIN: u32 = 500;
 const PERSISTENT_TTL_MAX: u32 = 2_000;
-
-// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
-
-// Maximum milestones one validator may approve for a single player.
-const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
 mod progress_contract {
     use scoutchain_shared_types::ProgressLevel;
@@ -478,10 +472,16 @@ impl VerificationContract {
     }
 
     pub fn get_validator_milestone_count(env: Env, wallet: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ValidatorMilestoneCount(wallet))
-            .unwrap_or(0u32)
+        let key = DataKey::ValidatorMilestoneCount(wallet);
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0u32);
+        if count > 0 {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+        }
+        count
     }
 
     pub fn get_total_milestone_count(env: Env) -> u32 {
@@ -693,7 +693,7 @@ mod tests {
         env.ledger().with_mut(|l| {
             l.sequence_number = 1;
         });
-        let id = env.register_contract(None, VerificationContract);
+        let id = env.register(VerificationContract, ());
         let client = VerificationContractClient::new(&env, &id);
         (env, client)
     }
@@ -1463,5 +1463,95 @@ mod tests {
         // Assert counters are unchanged.
         assert_eq!(client.get_milestone_count(&player_id), milestone_count_before);
         assert_eq!(client.get_validator_milestone_count(&validator), validator_count_before);
+    }
+
+    // -------------------------------------------------------------------------
+    // batch_revoke_validators tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_batch_revoke_validators_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
+        client.register_validator(&v2, &String::from_str(&env, "Coach B"));
+        client.register_validator(&v3, &String::from_str(&env, "Coach C"));
+
+        let wallets = soroban_sdk::vec![&env, v1.clone(), v2.clone(), v3.clone()];
+        let reason: Option<String> = None;
+        let count = client.batch_revoke_validators(&wallets, &reason);
+        assert_eq!(count, 3);
+        assert!(!client.is_active_validator(&v1));
+        assert!(!client.is_active_validator(&v2));
+        assert!(!client.is_active_validator(&v3));
+    }
+
+    #[test]
+    fn test_batch_revoke_validators_empty_returns_empty_batch() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallets = soroban_sdk::vec![&env];
+        let reason: Option<String> = None;
+        let result = client.try_batch_revoke_validators(&wallets, &reason);
+        assert_eq!(result, Err(Ok(VerificationError::EmptyBatch)));
+    }
+
+    #[test]
+    fn test_batch_revoke_validators_with_reason() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
+        client.register_validator(&v2, &String::from_str(&env, "Coach B"));
+
+        let wallets = soroban_sdk::vec![&env, v1.clone(), v2.clone()];
+        let reason = Some(String::from_str(&env, "Compliance violation"));
+        let count = client.batch_revoke_validators(&wallets, &reason);
+        assert_eq!(count, 2);
+        assert!(!client.is_active_validator(&v1));
+        assert!(!client.is_active_validator(&v2));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn test_batch_revoke_validators_unregistered_validator() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
+
+        // v2 is not registered — should panic with ValidatorNotFound
+        let wallets = soroban_sdk::vec![&env, v1.clone(), v2.clone()];
+        let reason: Option<String> = None;
+        client.batch_revoke_validators(&wallets, &reason);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn test_batch_revoke_validators_reason_too_long() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let v1 = Address::generate(&env);
+        client.register_validator(&v1, &String::from_str(&env, "Coach"));
+
+        let wallets = soroban_sdk::vec![&env, v1.clone()];
+        let long_reason = "x".repeat(129);
+        let reason = Some(String::from_str(&env, &long_reason));
+        client.batch_revoke_validators(&wallets, &reason);
     }
 }

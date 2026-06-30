@@ -58,7 +58,7 @@ pub fn milestone_disputed(
     env: &Env,
     player_id: u64,
     milestone_index: u32,
-    reason: &String,
+    _reason: &String,
 ) {
     env.events().publish(
         (Symbol::new(env, "milestone_disputed"), player_id, milestone_index),

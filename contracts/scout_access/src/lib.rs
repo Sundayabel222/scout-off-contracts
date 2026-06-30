@@ -1527,6 +1527,74 @@ mod tests {
         assert_eq!(stored.contact_fee_stroops, 200_000);
     }
 
+    #[test]
+    fn test_initialize_contact_fee_below_min_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            contact_fee_stroops: MIN_CONTACT_FEE_STROOPS - 1,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_basic_sub_below_min_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            basic_sub_stroops: MIN_SUB_FEE_STROOPS - 1,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_pro_sub_below_min_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            pro_sub_stroops: MIN_SUB_FEE_STROOPS - 1,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_elite_sub_below_min_returns_invalid_input() {
+        let (env, admin, xlm, client) = make_contract();
+        let bad_fees = FeeConfig {
+            elite_sub_stroops: MIN_SUB_FEE_STROOPS - 1,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    #[test]
+    fn test_initialize_contact_fee_at_min_succeeds() {
+        let (env, admin, xlm, client) = make_contract();
+        let fees = FeeConfig {
+            contact_fee_stroops: MIN_CONTACT_FEE_STROOPS,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &fees);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_initialize_sub_fee_at_min_succeeds() {
+        let (env, admin, xlm, client) = make_contract();
+        let fees = FeeConfig {
+            basic_sub_stroops: MIN_SUB_FEE_STROOPS,
+            pro_sub_stroops: MIN_SUB_FEE_STROOPS,
+            elite_sub_stroops: MIN_SUB_FEE_STROOPS,
+            ..default_fees()
+        };
+        let result = client.try_initialize(&admin, &xlm, &fees);
+        assert!(result.is_ok());
+    }
+
     // -------------------------------------------------------------------------
     // Downgrade guard tests
     // -------------------------------------------------------------------------
