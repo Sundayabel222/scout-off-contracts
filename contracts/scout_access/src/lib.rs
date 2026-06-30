@@ -684,6 +684,17 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MAX,
         );
 
+        // Verify the scout has previously contacted this player.
+        let contact_key = DataKey::ContactRecord(player_id, scout.clone());
+        if !env.storage().persistent().has(&contact_key) {
+            return Err(ScoutAccessError::Unauthorized);
+        }
+        env.storage().persistent().extend_ttl(
+            &contact_key,
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
         // #456: Enforce per-(scout, player) cooldown to prevent offer flooding.
         // Reject a second offer from the same scout to the same player within
         // TRIAL_OFFER_COOLDOWN_SECS (24 h). Offers to different players are
@@ -1687,6 +1698,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
@@ -1725,6 +1737,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         let idx = client.log_trial_offer(
             &scout,
             &1u64,
@@ -1741,6 +1754,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         let idx = client.log_trial_offer(
             &scout,
             &1u64,
@@ -1766,6 +1780,7 @@ mod tests {
         let scout = Address::generate(&env);
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
 
         client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
 
@@ -2481,6 +2496,7 @@ mod tests {
         let scout = Address::generate(&env);
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &player_id);
         let idx = client.log_trial_offer(
             &scout,
             &player_id,
@@ -2535,6 +2551,7 @@ mod tests {
         let scout = Address::generate(&env);
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &player_id);
         let result = client.try_log_trial_offer(
             &scout,
             &player_id,
@@ -2576,6 +2593,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         // First offer — must succeed.
         client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
 
@@ -2595,6 +2613,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
 
         // Advance past the 24-hour cooldown.
@@ -2617,7 +2636,10 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &1u64);
         client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
+
+        client.pay_to_contact(&scout, &2u64);
 
         // Offer to a DIFFERENT player must not be rate-limited.
         let result = client.try_log_trial_offer(
@@ -2666,6 +2688,7 @@ mod tests {
 
         // Subscribe scout to Elite tier
         client.subscribe(&scout, &SubscriptionTier::Elite);
+        client.pay_to_contact(&scout, &player_id);
 
         // Pause the contract
         client.pause_contract();
