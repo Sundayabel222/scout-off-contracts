@@ -1123,4 +1123,12 @@ mod tests {
         let result = prog_client2.try_advance_level(&caller, &1u64, &99u32);
         assert_eq!(result, Err(Ok(ProgressError::NotInitialized)));
     }
+
+    #[test]
+    fn test_get_level_returns_unverified_when_no_advance() {
+        let (_, client, _) = setup();
+        assert_eq!(client.get_level(&999u64), ProgressLevel::Unverified);
+    }
+
+
 }
