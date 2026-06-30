@@ -603,6 +603,24 @@ impl ScoutAccessContract {
             TRIAL_TTL_EXTEND_TO,
         );
 
+        // #468: Update per-scout trial offer index so scouts can enumerate all
+        // trial offers they have logged without an off-chain event index.
+        let scout_index_key = DataKey::ScoutTrialOffers(scout.clone());
+        let mut scout_offers: soroban_sdk::Vec<(u64, u32)> = env
+            .storage()
+            .persistent()
+            .get(&scout_index_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        scout_offers.push_back((player_id, next_index));
+        env.storage()
+            .persistent()
+            .set(&scout_index_key, &scout_offers);
+        env.storage().persistent().extend_ttl(
+            &scout_index_key,
+            TRIAL_TTL_THRESHOLD,
+            TRIAL_TTL_EXTEND_TO,
+        );
+
         // Cross-contract call: advance the player to Level 3 if progress contract is set.
         if let Some(progress_addr) = env
             .storage()
@@ -789,6 +807,31 @@ impl ScoutAccessContract {
             initialized,
             paused,
         }
+    }
+
+    /// Returns all (player_id, trial_index) tuples for every trial offer logged
+    /// by `scout`. The returned Vec is in insertion order (oldest first).
+    ///
+    /// Returns an empty Vec for a scout who has not logged any trial offers.
+    /// Each tuple can be passed to `get_trial_offer(player_id, index)` to fetch
+    /// the full offer record (closes #468).
+    pub fn get_scout_trial_offers(
+        env: Env,
+        scout: Address,
+    ) -> soroban_sdk::Vec<(u64, u32)> {
+        Self::bump_instance_ttl(&env);
+        let key = DataKey::ScoutTrialOffers(scout.clone());
+        let list = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !list.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TRIAL_TTL_THRESHOLD, TRIAL_TTL_EXTEND_TO);
+        }
+        list
     }
 
     /// Returns the deployed crate version (from Cargo.toml at build time).
@@ -2174,5 +2217,137 @@ assert_eq!(
             payload,
             (SubscriptionTier::Pro, sub.subscribed_at, sub.expires_at).into_val(&env)
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // #468: ScoutTrialOffers index and get_scout_trial_offers
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_scout_trial_offers_returns_empty_for_no_offers() {
+        let (env, _admin, _xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        let offers = client.get_scout_trial_offers(&scout);
+        assert_eq!(offers.len(), 0);
+    }
+
+    #[test]
+    fn test_scout_trial_offers_index_updated_on_log_trial_offer() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        let player_id_1: u64 = 1;
+        let player_id_2: u64 = 2;
+
+        let idx1 = client.log_trial_offer(
+            &scout,
+            &player_id_1,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        let idx2 = client.log_trial_offer(
+            &scout,
+            &player_id_2,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+
+        let offers = client.get_scout_trial_offers(&scout);
+        assert_eq!(offers.len(), 2);
+        assert_eq!(offers.get(0).unwrap(), (player_id_1, idx1));
+        assert_eq!(offers.get(1).unwrap(), (player_id_2, idx2));
+    }
+
+    #[test]
+    fn test_different_scouts_have_independent_indexes() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout_a = Address::generate(&env);
+        let scout_b = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout_a, 100_000_000);
+        mint_token(&env, &xlm, &admin, &scout_b, 100_000_000);
+
+        client.subscribe(&scout_a, &SubscriptionTier::Elite);
+        client.subscribe(&scout_b, &SubscriptionTier::Elite);
+
+        // Scout A logs two offers for different players
+        client.log_trial_offer(
+            &scout_a,
+            &10u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        client.log_trial_offer(
+            &scout_a,
+            &11u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+
+        // Scout B logs one offer
+        client.log_trial_offer(
+            &scout_b,
+            &20u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+
+        let offers_a = client.get_scout_trial_offers(&scout_a);
+        let offers_b = client.get_scout_trial_offers(&scout_b);
+
+        // Scout A has 2 entries, Scout B has 1 — indexes are independent
+        assert_eq!(offers_a.len(), 2);
+        assert_eq!(offers_b.len(), 1);
+        assert_eq!(offers_a.get(0).unwrap().0, 10u64);
+        assert_eq!(offers_a.get(1).unwrap().0, 11u64);
+        assert_eq!(offers_b.get(0).unwrap().0, 20u64);
+    }
+
+    #[test]
+    fn test_multi_scout_multi_player_trial_offers() {
+        // Acceptance criteria: multi-scout, multi-player trial offer scenarios
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scouts: [Address; 3] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        for scout in &scouts {
+            mint_token(&env, &xlm, &admin, scout, 100_000_000);
+            client.subscribe(scout, &SubscriptionTier::Elite);
+        }
+
+        // Scout 0: offers to player 1, player 2
+        let idx_s0_p1 = client.log_trial_offer(
+            &scouts[0],
+            &1u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        let idx_s0_p2 = client.log_trial_offer(
+            &scouts[0],
+            &2u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        // Scout 1: offer to player 3
+        let idx_s1_p3 = client.log_trial_offer(
+            &scouts[1],
+            &3u64,
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+        // Scout 2: no offers yet
+        let offers_2 = client.get_scout_trial_offers(&scouts[2]);
+        assert_eq!(offers_2.len(), 0, "scout with no offers returns empty index");
+
+        let offers_0 = client.get_scout_trial_offers(&scouts[0]);
+        let offers_1 = client.get_scout_trial_offers(&scouts[1]);
+
+        assert_eq!(offers_0.len(), 2);
+        assert_eq!(offers_0.get(0).unwrap(), (1u64, idx_s0_p1));
+        assert_eq!(offers_0.get(1).unwrap(), (2u64, idx_s0_p2));
+
+        assert_eq!(offers_1.len(), 1);
+        assert_eq!(offers_1.get(0).unwrap(), (3u64, idx_s1_p3));
+
+        // Verify index tuples resolve to correct TrialOffer records
+        let offer_s0_p1 = client.get_trial_offer(&1u64, &idx_s0_p1);
+        assert_eq!(offer_s0_p1.scout, scouts[0]);
+        assert_eq!(offer_s0_p1.player_id, 1u64);
     }
 }
