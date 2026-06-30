@@ -912,6 +912,34 @@ mod tests {
         client.register_player(&wallet, &vitals, &hashes);
     }
 
+    /// Verifies that a position string of exactly 65 bytes (one over MAX_STRING_LEN=64)
+    /// is rejected with the explicit `InvalidInput` error code, pinning the upper-bound
+    /// enforcement so a silent regression cannot go undetected.
+    #[test]
+    fn test_register_player_position_65_bytes_returns_invalid_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        // 65 ASCII bytes — one over the MAX_STRING_LEN = 64 limit
+        let position_65 = String::from_str(&env, &"A".repeat(65));
+        let vitals = PlayerVitals {
+            age: 20,
+            position: position_65,
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        let result = client.try_register_player(&wallet, &vitals, &hashes);
+        assert_eq!(
+            result,
+            Err(Ok(ScoutChainError::InvalidInput)),
+            "expected InvalidInput when position exceeds 64 bytes"
+        );
+    }
+
     #[test]
     fn test_register_player_position_max_len_ok() {
         let (env, client) = setup();

@@ -862,6 +862,46 @@ mod tests {
         client.transfer_admin(&Address::generate(&env));
     }
 
+    /// Asserts that `transfer_admin` publishes an `admin_transferred` event whose
+    /// data payload carries exactly the old and new admin addresses, in that order.
+    /// A silent regression in event emission (wrong addresses, missing event, wrong
+    /// symbol) would be caught immediately by this test.
+    #[test]
+    fn test_transfer_admin_emits_event_with_correct_addresses() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &contract_id);
+
+        let old_admin = Address::generate(&env);
+        client.initialize(&old_admin);
+
+        // Wire a dummy verification contract (required by advance_level; not relevant here)
+        let verification = Address::generate(&env);
+        client.set_verification_contract(&verification);
+
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&new_admin);
+
+        // events::admin_transferred publishes:
+        //   topics : (Symbol("admin_transferred"),)
+        //   data   : (old_admin, new_admin)
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id,
+                    soroban_sdk::vec![
+                        &env,
+                        Symbol::new(&env, "admin_transferred").into_val(&env),
+                    ],
+                    (old_admin.clone(), new_admin.clone()).into_val(&env),
+                )
+            ]
+        );
+    }
+
     #[test]
     fn test_pause_and_unpause() {
         let (env, client, validator) = setup();
