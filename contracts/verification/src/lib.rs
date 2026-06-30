@@ -24,6 +24,10 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use scoutchain_shared_types::validate_cid;
 
 const MAX_CREDENTIALS_LEN: u32 = 256;
+/// Minimum credentials length for validator registration.
+/// Credentials must contain at least a short certification identifier
+/// (e.g. "UEFA B" = 6 chars) to prevent empty or trivially short strings.
+const MIN_CREDENTIALS_LEN: u32 = 10;
 const MAX_GLOBAL_MILESTONE_INDEX: u32 = 500;
 
 const ADMIN_BUMP_LEDGERS: u32 = 10000;
@@ -152,6 +156,10 @@ impl VerificationContract {
         Self::require_not_paused(&env)?;
 
         if credentials.len() > MAX_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
+
+        if credentials.len() < MIN_CREDENTIALS_LEN {
             return Err(VerificationError::InvalidInput);
         }
 
@@ -775,7 +783,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         // Unknown wallet returns 0
         assert_eq!(
@@ -806,8 +814,8 @@ mod tests {
 
         let v1 = Address::generate(&env);
         let v2 = Address::generate(&env);
-        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
-        client.register_validator(&v2, &String::from_str(&env, "Coach B"));
+        client.register_validator(&v1, &String::from_str(&env, "UEFA-B-CoachA"));
+        client.register_validator(&v2, &String::from_str(&env, "UEFA-B-CoachB"));
 
         client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmEv1"));
         assert_eq!(client.get_total_milestone_count(), 1);
@@ -865,7 +873,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         let idx1 = client.approve_milestone(
             &validator,
@@ -891,7 +899,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         let reason: Option<String> = None;
         client.revoke_validator(&validator, &reason);
 
@@ -905,7 +913,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         let reason = Some(String::from_str(&env, "Misconduct and protocol violation"));
         client.revoke_validator(&validator, &reason);
 
@@ -920,7 +928,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         // 129-byte string
         let long_reason = "x".repeat(129);
         let reason = Some(String::from_str(&env, &long_reason));
@@ -935,7 +943,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         let reason: Option<String> = None;
         client.revoke_validator(&validator, &reason);
 
@@ -973,8 +981,8 @@ mod tests {
 
         let validator1 = Address::generate(&env);
         let validator2 = Address::generate(&env);
-        client.register_validator(&validator1, &String::from_str(&env, "Coach A"));
-        client.register_validator(&validator2, &String::from_str(&env, "Coach B"));
+        client.register_validator(&validator1, &String::from_str(&env, "UEFA-B-CoachA"));
+        client.register_validator(&validator2, &String::from_str(&env, "UEFA-B-CoachB"));
 
         client.approve_milestone(
             &validator1,
@@ -1005,7 +1013,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         client.pause_contract();
 
@@ -1026,7 +1034,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         // Pre-set the counter to u32::MAX so the next increment overflows
         env.as_contract(&client.address, || {
@@ -1163,7 +1171,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
         client.upgrade(&new_wasm_hash);
@@ -1278,7 +1286,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         // 45 chars starting with Qm — one short of valid CIDv0
         client.approve_milestone(
             &validator, &1u64,
@@ -1294,7 +1302,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         // 47 chars starting with Qm — one over valid CIDv0
         client.approve_milestone(
             &validator, &1u64,
@@ -1310,7 +1318,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         // 46 chars but contains '0' which is invalid in base58btc
         client.approve_milestone(
             &validator, &1u64,
@@ -1325,7 +1333,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         let idx = client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
@@ -1341,7 +1349,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         // 58 chars starting with bafy — one short of valid CIDv1
         client.approve_milestone(
             &validator, &1u64,
@@ -1356,7 +1364,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         let idx = client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
@@ -1372,7 +1380,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
         client.approve_milestone(
             &validator, &1u64,
             &String::from_str(&env, "test"),
@@ -1404,7 +1412,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         let player_id: u64 = 1u64;
         client.approve_milestone(
@@ -1447,7 +1455,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         let player_id: u64 = 42u64;
         let description = String::from_str(&env, "Speed test passed 30 km/h");
@@ -1502,7 +1510,7 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.register_validator(&validator, &String::from_str(&env, "UEFA-B-License"));
 
         let player_id: u64 = 7u64;
         client.approve_milestone(
